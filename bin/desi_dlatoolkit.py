@@ -56,7 +56,7 @@ def parse(options=None):
                         help='path to intrinsic flux model, defaults to v1.1 Redrock QSO_HIZ')
 
     parser.add_argument('--varlss', type = str, default = None, required = False,
-                        help='path to LSS variance input files, defaults to Jura LSS variance')
+                        help='path to LSS variance input files, defaults to iron LSS variance')
 
     parser.add_argument('--balmask', default = False, required = False, action='store_true',
                         help='should BALs be masked using AI_CIV? Default is False but recommended setting is True')
@@ -135,7 +135,7 @@ def main(args=None):
     # add lss variance info to dictionary for forest fitting
     if args.varlss is None:
         # locate default file in repo
-        args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/jura-var-lss.fits'))
+        args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/iron-var-lss.fits'))
     fluxmodel = read_varlss(args.varlss, fluxmodel)
 
     # set up for nested multiprocessing
