@@ -220,12 +220,24 @@ def main(args=None):
                 gresults = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'), ext=1))
                 fin_results = vstack([fin_results,gresults])
             
-        fin_results.meta['EXTNAME'] = 'DLACAT'
+        # split into good and flagged catalogs
+        good_mask = fin_results['DLAFLAG'] == 0
+        fin_results_good = fin_results[good_mask]
+        fin_results_flagged = fin_results[~good_mask]
 
-        outfile = f"{os.path.join(args.outdir, args.outfile)}.fits"
+        # set extension name
+        fin_results_good.meta['EXTNAME'] = 'DLACAT'
+        fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
+
+        outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
         if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}.fits already exists in {args.outdir}, overwriting')
-        fin_results.write(outfile, overwrite=True)
+            print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
+        fin_results_good.write(outfile, overwrite=True)
+
+        outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
+        if os.path.isfile(outfile):
+            print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
+        fin_results_flagged.write(outfile, overwrite=True)
 
         # remove temporary files
         for g in np.arange(groups+1):
