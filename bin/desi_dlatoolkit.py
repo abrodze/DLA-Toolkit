@@ -229,6 +229,9 @@ def main(args=None):
         fin_results_good.meta['EXTNAME'] = 'DLACAT'
         fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
 
+        # remove DLAFLAG column from good catalogs
+        fin_results_good.remove_column('DLAFLAG')
+
         outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
         if os.path.isfile(outfile):
             print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
@@ -329,7 +332,10 @@ def main(args=None):
         good_mask = fin_results['DLAFLAG'] == 0
         fin_results_good = fin_results[good_mask]
         fin_results_flagged = fin_results[~good_mask]
-    
+        
+        # remove DLAFLAG column from good catalogs
+        fin_results_good.remove_column('DLAFLAG')
+
         # set extension name
         fin_results_good.meta['EXTNAME'] = 'DLACAT'
         fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
