@@ -150,8 +150,14 @@ def main(args=None):
         # healpix list
         unihpx = np.unique(catalog['HPXPIXEL'])
         # process in batches to allow intermediate caching
-        groups = 25
-        group_step = int(len(unihpx)/groups)
+        if len(unihpx) < 25:
+            groups = 1
+            group_step = len(unihpx)
+            # no longer need nested multiprocessing
+            nproc_futures = 1
+        else:
+            groups = 25
+            group_step = int(len(unihpx)/groups)
 
         datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
    
@@ -168,8 +174,9 @@ def main(args=None):
                 if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
                     
                     for hpx in unihpx[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath, catalog[catalog['HPXPIXEL'] == hpx],
-                                                           fluxmodel, args.nproc))
+                        group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
+                                                                     catalog[catalog['HPXPIXEL'] == hpx], 
+                                                                     fluxmodel, args.nproc))
 
                     # remove extra column from hpx with no detections
                     group_results = vstack(group_results)
@@ -264,9 +271,15 @@ def main(args=None):
         speclist = glob.glob(f'{datapath}/*/*/spectra-16*.fits')
         speclist.sort()
 
-        # process in batches for caching
-        groups = 25
-        group_step = int(len(speclist)/groups)
+        # process in batches to allow intermediate caching
+        if len(speclist) < 25:
+            groups = 1
+            group_step = len(speclist)
+            # no longer need nested multiprocessing
+            nproc_futures = 1
+        else:
+            groups = 25
+            group_step = int(len(speclist)/groups)
 
         if nproc_futures == 1:
             for g in np.arange(0, groups+1):
