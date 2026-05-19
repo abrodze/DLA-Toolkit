@@ -248,7 +248,7 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
         zqso = catalog['Z'][entry]
 
         idx = tid_to_idx.get(tid)
-        if idx in None:
+        if idx is None:
             print(f'{timestamp()} - Error: Targetid {tid} NOT FOUND on {coaddpath}')
             continue
 
@@ -322,16 +322,17 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
                 fitwarn[balflag] |= DLAFLAG.POTENTIAL_BAL
 
         # average signal to noise computation
-        mask = np.logical_and(ivar != 0, ((wave_rf <= constants.bluesnr_min) & (wave_rf >= constants.bluesnr_max)))
-        bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-        
-        mask = np.logical_and(ivar != 0, ((wave_rf <= constants.redsnr_min) & (wave_rf >= constants.redsnr_max)))
-        redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-
+        mask = (ivar != 0) & ((wave_rf >= constants.bluesnr_min) & (wave_rf <= constants.bluesnr_max))
         # check for insufficent coverage and set to -1
-        if np.isinf(bluesnr) or np.isnan(bluesnr):
+        if np.any(mask):
+            bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+        else:
             bluesnr = -1
-        if np.isinf(redsnr) or np.isnan(redsnr):
+        
+        mask = (ivar != 0) & ((wave_rf >= constants.redsnr_min) & (wave_rf <= constants.redsnr_max))
+        if np.any(mask):
+            redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+        else:
             redsnr = -1
             
         ndla = np.sum(zdla != -1)
