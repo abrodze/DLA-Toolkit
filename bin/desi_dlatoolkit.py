@@ -135,11 +135,12 @@ def main(args=None):
     # add lss variance info to dictionary for forest fitting
     if args.varlss is None:
         # locate default file in repo
-        args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/iron-var-lss.fits'))
+        args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/jura-var-lss.fits'))
     fluxmodel = read_varlss(args.varlss, fluxmodel)
 
     # set up for nested multiprocessing
-    nproc_futures = int(os.cpu_count()/args.nproc)
+    nproc_futures = max(1, os.cpu_count() // args.nproc)
+    
     if args.nproc == 1:
         print(f"{timestamp()} - Warning: nproc set to {args.nproc}, disabling multiprocessing")
         nproc_futures = 1
@@ -176,7 +177,7 @@ def main(args=None):
                         group_results.remove_column('col0')
 
                     # write tmp file
-                    if len(results) != 0:
+                    if len(group_results) != 0:
                         group_results.write(outfile)
 
         if nproc_futures > 1: 
@@ -446,21 +447,27 @@ def read_mock_catalog(qsocat, balmask, mockpath):
             cols = ['TARGETID', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
             balcat = Table(fitsio.read(balcat, ext=1, columns=cols))
             
-            # add columns to catalog
-            ai = np.full(len(catalog), 0.)
-            nciv = np.full(len(catalog), 0)
-            vmin = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
-            vmax = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
-
-            for i,tid in enumerate(catalog['TARGETID']):
-                if np.any(tid == balcat['TARGETID']):
-                    match = balcat[balcat['TARGETID'] == tid]
-                    ai[i] = match['AI_CIV']
-                    nciv[i] = match['NCIV_450']
-                    vmin[i] = match['VMIN_CIV_450']
-                    vmax[i] = match['VMAX_CIV_450']
-
-            catalog.add_columns([ai, nciv, vmin, vmax], names=['AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450'])
+            # sort BAL catalog by TARGETID for searchsorted
+            bal_tids = np.asarray(balcat['TARGETID'])
+            order = np.argsort(bal_tids)
+            bal_tids_sorted = bal_tids[order]
+    
+            cat_tids = np.asarray(catalog['TARGETID'])
+            # locate each catalog TID in the sorted BAL TID array
+            idx = np.searchsorted(bal_tids_sorted, cat_tids)
+            # guard against out-of-range and confirm exact match
+            in_range = idx < len(bal_tids_sorted)
+            valid = np.zeros(len(cat_tids), dtype=bool)
+            valid[in_range] = bal_tids_sorted[idx[in_range]] == cat_tids[in_range]
+    
+            match_rows = order[idx[valid]]  # rows in original balcat
+            ai[valid] = balcat['AI_CIV'][match_rows]
+            nciv[valid] = balcat['NCIV_450'][match_rows]
+            vmin[valid] = balcat['VMIN_CIV_450'][match_rows]
+            vmax[valid] = balcat['VMAX_CIV_450'][match_rows]
+    
+            catalog.add_columns([ai, nciv, vmin, vmax],
+                                names=['AI_CIV','NCIV_450','VMIN_CIV_450','VMAX_CIV_450'])
         
         except:
             print(f'{timestamp()} - Critical Error: cannot find mock bal_cat.fits in {mockpath}')
