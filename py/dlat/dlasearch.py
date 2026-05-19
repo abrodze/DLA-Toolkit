@@ -231,6 +231,9 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
     tidlist, ralist, declist, zqsolist, bluesnrlist, redsnrlist, dlaidlist = [], [], [], [], [], [], []
     zlist, nhilist, dchi2list, zerrlist, nhierrlist, fitwarnlist, coefflist = [], [], [], [], [], [], []
 
+    # create tid to index mapping
+    tid_to_idx = {tid: i for i, tid in enumerate(np.asarray(specobj.fibermap['TARGETID']))}
+
     # for each entry in passed catalog, fit spectrum with intrinsic model + N DLA
     for entry in range(len(catalog)):
 
@@ -244,10 +247,9 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
             dec = catalog['DEC'][entry]
         zqso = catalog['Z'][entry]
 
-        try:
-            idx = np.nonzero(specobj.fibermap['TARGETID']==tid)[0][0]
-        except:
-            print(f'{timestamp()} - Error: Targetid {tid} NOT FOUND on healpix {healpix}')
+        idx = tid_to_idx.get(tid)
+        if idx in None:
+            print(f'{timestamp()} - Error: Targetid {tid} NOT FOUND on {coaddpath}')
             continue
 
         flux = specobj.flux['brz'][idx]
@@ -258,7 +260,7 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
         fitmask = wave_rf > constants.search_minlam
 
         # limit our bestfit comparision w/ and w/o DLAs to search region of spectrum
-        searchmask = np.ma.masked_inside(wave_rf[fitmask], constants.search_minlam, constants.search_maxlam).mask
+        searchmask = (wave_rf[fitmask] >= constants.search_minlam) & (wave_rf[fitmask] <= constants.search_maxlam)
         
         # apply mask to BAL features, if available
         if 'NCIV_450' in catalog.columns:
@@ -271,7 +273,7 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
 
                 for line, lam in constants.bal_lines.items():
                     # Mask wavelengths within the velocity ranges
-                    mask = np.ma.masked_inside(wave_rf, lam*v_min, lam*v_max).mask
+                    mask = (wave_rf >= lam*v_min) & (wave_rf <= lam*v_max)
                     if (line == 'Lya') or (line == 'NV'):
                         rededge = (lam*v_min)*(1+zqso)
                         blueedge = (lam*v_max)*(1+zqso)
@@ -319,6 +321,19 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
                 balflag = (lam_center_dla < window[0]) & (lam_center_dla > window[1])
                 fitwarn[balflag] |= DLAFLAG.POTENTIAL_BAL
 
+        # average signal to noise computation
+        mask = np.logical_and(ivar != 0, ((wave_rf <= constants.bluesnr_min) & (wave_rf >= constants.bluesnr_max)))
+        bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+        
+        mask = np.logical_and(ivar != 0, ((wave_rf <= constants.redsnr_min) & (wave_rf >= constants.redsnr_max)))
+        redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+
+        # check for insufficent coverage and set to -1
+        if np.isinf(bluesnr) or np.isnan(bluesnr):
+            bluesnr = -1
+        if np.isinf(redsnr) or np.isnan(redsnr):
+            redsnr = -1
+            
         ndla = np.sum(zdla != -1)
         for n in range(ndla):
             tidlist.append(tid)
@@ -334,20 +349,6 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
             dchi2list.append(dchi2[n])
             fitwarnlist.append(fitwarn[n])
             coefflist.append(coeff_dla[n])
-            
-            # average signal to noise computation
-            mask = np.logical_and(ivar != 0, np.ma.masked_inside(wave_rf, constants.bluesnr_min, constants.bluesnr_max).mask)
-            bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-            
-            mask = np.logical_and(ivar != 0, np.ma.masked_inside(wave_rf, constants.redsnr_min, constants.redsnr_max).mask)
-            redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-
-            # check for insufficent coverage and set to -1
-            if np.isinf(bluesnr) or np.isnan(bluesnr):
-                bluesnr = -1
-            if np.isinf(redsnr) or np.isnan(redsnr):
-                redsnr = -1
-
             bluesnrlist.append(bluesnr)
             redsnrlist.append(redsnr)
 
@@ -649,6 +650,11 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
     # find minimum of course search
     bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
 
+    # if all of chi2 surface is > null chi2, do not bother with refined solve
+    if zchi2[bf] > chi2null:
+        return(zdla_soln, zerr_soln, nhi_soln, nhierr_soln, dchi2_soln, fitwarning, coeff_soln)
+
+    # otherwise let's continie with solving
     bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[0], coeff = refined_fit(bf[0], bf[1], zchi2[bf], None)
    
 
