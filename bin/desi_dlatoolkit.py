@@ -13,9 +13,9 @@ import os
 import datetime
 import time
 import argparse
-from concurrent.futures import ProcessPoolExecutor
 import glob
 import importlib
+import multiprocessing as mp
 
 from dlat import dlasearch
 from dlat import constants
@@ -104,13 +104,13 @@ def main(args=None):
     # check if mock data
     if args.mocks and (args.mockdir is None):
         print(f"{timestamp()} - Critical Error: mocks argument set to true but no mock data path provided")
+        exit(1)
     elif args.mocks and not(os.path.exists(args.mockdir)):
         print(f"{timestamp()} - Critical Error: {args.mockdir} does not exist")
         exit(1)
     # check if output directory already exists
-    if not(os.path.isdir(args.outdir)):
-        os.mkdir(args.outdir)
-    # remove if present
+    os.makedirs(args.outdir, exist_ok=True)
+    # remove "fits" if present
     if args.outfile.endswith(".fits"):
         args.outfile = args.outfile.removesuffix(".fits")
 
@@ -137,46 +137,40 @@ def main(args=None):
         # locate default file in repo
         args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/jura-var-lss.fits'))
     fluxmodel = read_varlss(args.varlss, fluxmodel)
-
-    # set up for nested multiprocessing
-    nproc_futures = max(1, os.cpu_count() // args.nproc)
     
     if args.nproc == 1:
-        print(f"{timestamp()} - Warning: nproc set to {args.nproc}, disabling multiprocessing")
-        nproc_futures = 1
+        print(f"{timestamp()} - Warning: nproc set to {args.nproc}, multiprocessing disabled")
 
     if not(args.tilebased) and not(args.mocks):
         
         # healpix list
         unihpx = np.unique(catalog['HPXPIXEL'])
         # process in batches to allow intermediate caching
-        if len(unihpx) < 25:
+        if len(unihpx) < 10:
             groups = 1
             group_step = len(unihpx)
-            # no longer need nested multiprocessing
-            nproc_futures = 1
         else:
-            groups = 25
-            group_step = int(len(unihpx)/groups)
+            groups = 10
+            group_step = int(np.ceil(len(unihpx)/groups))
 
         datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
    
-        if nproc_futures == 1:
+        if args.nproc == 1:
             
-            for g in np.arange(0, groups+1):
+            for g in np.arange(0, groups):
                 
                 # check if group has already been processed and confirm it is not empty
                 outfile = os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')
                 group_results = []
                 iini = g*group_step
-                ifin = g*group_step + group_step
+                ifin = min((g+1)*group_step, len(unihpx))
 
                 if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
                     
                     for hpx in unihpx[iini:ifin]:
                         group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
                                                                      catalog[catalog['HPXPIXEL'] == hpx], 
-                                                                     fluxmodel, args.nproc))
+                                                                     fluxmodel))
 
                     # remove extra column from hpx with no detections
                     group_results = vstack(group_results)
@@ -187,28 +181,27 @@ def main(args=None):
                     if len(group_results) != 0:
                         group_results.write(outfile)
 
-        if nproc_futures > 1: 
+        if args.nproc > 1: 
             arguments = [ {"healpix": hpx , \
                        "survey": args.survey, \
                        "program": args.program, \
                        "datapath": datapath, \
                        "hpxcat": catalog[catalog['HPXPIXEL'] == hpx], \
                        "model": fluxmodel, \
-                       "nproc" : args.nproc \
                        } for ih,hpx in enumerate(unihpx)]
         
-            with ProcessPoolExecutor(nproc_futures) as pool:
+            with mp.Pool(args.nproc) as pool:
 
-                for g in np.arange(0, groups+1):
+                for g in np.arange(0, groups):
             
                     # check if group has already been processed and confirm it is not empty
                     outfile = os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')
                     iini = g*group_step
-                    ifin = g*group_step + group_step
+                    ifin = min((g+1)*group_step, len(unihpx))
 
                     if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
 
-                        results = list(pool.map(_dlasearchhpx, arguments[iini:ifin]))
+                        results = pool.map(_dlasearchhpx, arguments[iini:ifin])
                         
                         # remove extra column from hpx with no detections
                         results = vstack(results)
@@ -221,7 +214,7 @@ def main(args=None):
 
         # combine all batches into final catalog
         fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups+1):
+        for g in np.arange(1, groups):
             if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
             else:
@@ -251,7 +244,7 @@ def main(args=None):
         fin_results_flagged.write(outfile, overwrite=True)
 
         # remove temporary files
-        for g in np.arange(groups+1):
+        for g in np.arange(groups):
             if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')):
                 os.remove(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))
             else:
@@ -261,7 +254,7 @@ def main(args=None):
     # place holder until tile-based developed
     elif args.tilebased:
         # TO DO : process in batches to add caching
-        print('{timestamp()} - Critical Error: tile based capability does not exist')
+        print(f'{timestamp()} - Critical Error: tile based capability does not exist')
         exit(1)
 
     elif args.mocks:
@@ -272,28 +265,26 @@ def main(args=None):
         speclist.sort()
 
         # process in batches to allow intermediate caching
-        if len(speclist) < 25:
+        if len(speclist) < 10:
             groups = 1
             group_step = len(speclist)
-            # no longer need nested multiprocessing
-            nproc_futures = 1
         else:
-            groups = 25
-            group_step = int(len(speclist)/groups)
+            groups = 10
+            group_step = int(np.ceil(len(speclist)/groups))
 
-        if nproc_futures == 1:
-            for g in np.arange(0, groups+1):
+        if args.nproc == 1:
+            for g in np.arange(0, groups):
             
                 # check if group has already been processed and confirm it is not empty
                 outfile = os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
                 group_results = []
                 iini = g*group_step
-                ifin = g*group_step + group_step
+                ifin = min((g+1)*group_step, len(speclist))
 
                 if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
 
                     for specfile in speclist[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel, args.nproc))
+                        group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel))
 
                     # remove extra column from spec groups with no detections
                     group_results = vstack(group_results)
@@ -304,21 +295,20 @@ def main(args=None):
                     if len(group_results) != 0:
                         group_results.write(outfile)
 
-        if nproc_futures > 1:
+        if args.nproc > 1:
             arguments = [ {"specfile": specfile , \
                        "catalog": catalog, \
                        "model": fluxmodel, \
-                       "nproc" : args.nproc \
                        } for ih,specfile in enumerate(speclist) ]
+            
+            with mp.Pool(args.nproc) as pool:
 
-            with ProcessPoolExecutor(nproc_futures) as pool:
-
-                for g in np.arange(0, groups+1):
+                for g in np.arange(0, groups):
                     
                     # check if group has already been processed and confirm it is not empty
                     outfile = os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
                     iini = g*group_step
-                    ifin = g*group_step + group_step
+                    ifin = min((g+1)*group_step, len(speclist))
 
                     if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
 
@@ -335,7 +325,7 @@ def main(args=None):
 
         # combine all batches into final catalog
         fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups+1):
+        for g in np.arange(1, groups):
             if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
             else:
@@ -358,14 +348,16 @@ def main(args=None):
         if os.path.isfile(outfile):
             print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
         fin_results_good.write(outfile, overwrite=True)
+        print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
 
         outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
         if os.path.isfile(outfile):
             print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
         fin_results_flagged.write(outfile, overwrite=True)
+        print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
 
         # remove temporary files
-        for g in np.arange(groups+1):
+        for g in np.arange(groups):
             if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')):
                 os.remove(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))
             else:
@@ -374,7 +366,7 @@ def main(args=None):
     tfin = time.time()
     total_time = tfin-tini
 
-    print(f'{timestamp()} - SUCCESS: wrote DLA catalog to {outfile}')
+    print(f'{timestamp()} - SUCCESS')
     print(f'total run time: {np.round(total_time/60,1)} minutes')
 
 def read_catalog(qsocat, balmask, bytile):
@@ -454,37 +446,40 @@ def read_mock_catalog(qsocat, balmask, mockpath):
     catalog = catalog[zmask]
 
     if balmask:
-        try:
-            # open bal catalog
-            balcat = os.path.join(mockpath,'bal_cat.fits')
-            cols = ['TARGETID', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
-            balcat = Table(fitsio.read(balcat, ext=1, columns=cols))
+
+        # define columns to read
+        cols = ['TARGETID', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
+        balcat_path = os.path.join(mockpath,'bal_cat.fits')
+        balcat = Table(fitsio.read(balcat_path, ext=1, columns=cols))
+
+        # add columns to catalog
+        ai = np.full(len(catalog), 0.)
+        nciv = np.full(len(catalog), 0)
+        vmin = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
+        vmax = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
             
-            # sort BAL catalog by TARGETID for searchsorted
-            bal_tids = np.asarray(balcat['TARGETID'])
-            order = np.argsort(bal_tids)
-            bal_tids_sorted = bal_tids[order]
+        # sort BAL catalog by TARGETID for searchsorted
+        bal_tids = np.asarray(balcat['TARGETID'])
+        order = np.argsort(bal_tids)
+        bal_tids_sorted = bal_tids[order]
     
-            cat_tids = np.asarray(catalog['TARGETID'])
-            # locate each catalog TID in the sorted BAL TID array
-            idx = np.searchsorted(bal_tids_sorted, cat_tids)
-            # guard against out-of-range and confirm exact match
-            in_range = idx < len(bal_tids_sorted)
-            valid = np.zeros(len(cat_tids), dtype=bool)
-            valid[in_range] = bal_tids_sorted[idx[in_range]] == cat_tids[in_range]
+        cat_tids = np.asarray(catalog['TARGETID'])
+        # locate each catalog TID in the sorted BAL TID array
+        idx = np.searchsorted(bal_tids_sorted, cat_tids)
+        # guard against out-of-range and confirm exact match
+        in_range = idx < len(bal_tids_sorted)
+        valid = np.zeros(len(cat_tids), dtype=bool)
+        valid[in_range] = bal_tids_sorted[idx[in_range]] == cat_tids[in_range]
     
-            match_rows = order[idx[valid]]  # rows in original balcat
-            ai[valid] = balcat['AI_CIV'][match_rows]
-            nciv[valid] = balcat['NCIV_450'][match_rows]
-            vmin[valid] = balcat['VMIN_CIV_450'][match_rows]
-            vmax[valid] = balcat['VMAX_CIV_450'][match_rows]
+        match_rows = order[idx[valid]]  # rows in original balcat
+        ai[valid] = balcat['AI_CIV'][match_rows]
+        nciv[valid] = balcat['NCIV_450'][match_rows]
+        vmin[valid] = balcat['VMIN_CIV_450'][match_rows]
+        vmax[valid] = balcat['VMAX_CIV_450'][match_rows]
     
-            catalog.add_columns([ai, nciv, vmin, vmax],
-                                names=['AI_CIV','NCIV_450','VMIN_CIV_450','VMAX_CIV_450'])
+        catalog.add_columns([ai, nciv, vmin, vmax],
+                            names=['AI_CIV','NCIV_450','VMIN_CIV_450','VMAX_CIV_450'])
         
-        except:
-            print(f'{timestamp()} - Critical Error: cannot find mock bal_cat.fits in {mockpath}')
-            exit(1)
     
     return( catalog )
 
