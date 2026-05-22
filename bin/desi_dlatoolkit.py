@@ -70,14 +70,18 @@ def parse(options=None):
     parser.add_argument('--balmask', default = False, required = False, action='store_true',
                         help='should BALs be masked using AI_CIV? Default is False but recommended setting is True')
 
-    parser.add_argument('-o', '--outdir', type=str, default = None, required = True,
+    parser.add_argument('-o', '--outdir', type = str, default = None, required = True,
                         help='output directory for DLA catalog')
 
-    parser.add_argument('--outfile', type=str, default = None, required = True,
+    parser.add_argument('--outfile', type = str, default = None, required = True,
                         help='name for output FITS file containing DLA catalog')
 
     parser.add_argument('-n', '--nproc', type = int, default=64, required=False, 
                         help='number of multiprocressing processes to use, default is 64')
+
+    parser.add_argument('--dir_type', type = str, default = None, required = False,
+                        help='explicit directory tree type (e.g., healpix or uniqpix), \
+                        if none is passed then the release argument is used to make dir_type guess')
 
     if options is None:
         args  = parser.parse_args()
@@ -129,15 +133,25 @@ def main(args=None):
     if args.mocks:
         catalog = read_mock_catalog(args.qsocat, args.balmask, args.mockdir)
     else:
-        # set data path and expected healpix keyword based on release name
-        if np.any(args.release == healpix_mountains):
+        # set data path and expected healpix keyword based on release name or passed dir_type argument if understood
+        if args.dir_type is not None:
+            if args.dir_type == 'HPXPIXEL':
+                pix_keyword = args.dir_type
+                datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+            elif args.dir_type == 'UNIQPIXEL':
+                pix_keyword = args.dir_type
+                datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
+            else:
+                print(f"{timestamp()} - Critical Error: data directory tree argument is not understood")
+        elif np.any(args.release == healpix_mountains):
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
             pix_keyword = 'HPXPIXEL'
         elif np.any(args.release == uniqpix_mountains):
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
             pix_keyword = 'UNIQPIXEL'
         else:
-            print(f"{timestamp()} - Warning: {args.release} not recognized as an existing reduction. UNIQPIX structure will be assumed")
+            print(f"{timestamp()} - Warning: {args.release} not recognized as an existing reduction and no dir_type argument passed.\
+                                    UNIQPIX structure will be assumed")
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
             pix_keyword = 'UNIQPIXEL'
         catalog = read_catalog(args.qsocat, pix_keyword, args.balmask)
