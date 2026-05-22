@@ -51,17 +51,17 @@ def timestamp():
     return(now.strftime("%Y-%m-%d %H:%M:%S"))
 
 
-def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model):
+def dlasearch_hpx(healpix, survey, program, datapath, pixcat, model):
     """
     Find the best fitting DLA profile(s) for spectra in hpx catalog
 
     Arguments
     ---------
-    healpix (int) : N64 healpix
+    healpix (int) : healpixel number, agnostic to nside
     survey (str) : e.g., main, sv1, sv2, etc.
     program (str) : e.g., bright, dark, etc.
     datapath (str) : path to coadd files
-    hpxcat (table) : collection of spectra to search for DLAs, all belonging to
+    pixcat (table) : collection of spectra to search for DLAs, all belonging to
                      single healpix
     model (dict) : flux model dictionary containing 'PCA_WAVE', 'PCA_COMP', 'IGM',
                     'VAR_FUNC_LYA', and 'VAR_FUNC_LYB' keys
@@ -73,13 +73,13 @@ def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model):
 
     t0 = time.time()
    
-    # read spectra from healpix
+    # read spectra from healpixel
     coaddname = f'coadd-{survey}-{program}-{str(healpix)}.fits'
     coadd = os.path.join(datapath, str(healpix//100), str(healpix), coaddname)
 
     if os.path.exists(coadd):
 
-        fitresults = process_spectra_group(coadd, hpxcat, model, False)
+        fitresults = process_spectra_group(coadd, pixcat, model, False)
 
     else:
         print(f'{timestamp()} - Warning: could not locate coadd file for healpix {healpix}')
@@ -88,7 +88,7 @@ def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model):
 
     t1 = time.time()
     total = np.round(t1-t0,2)
-    print(f'{timestamp()} - Completed processing of {len(hpxcat)} spectra from healpix {healpix} in {total}s')
+    print(f'{timestamp()} - Completed processing of {len(pixcat)} spectra from healpix {healpix} in {total}s')
 
     return fitresults
     

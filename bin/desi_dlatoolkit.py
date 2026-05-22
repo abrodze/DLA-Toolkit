@@ -20,6 +20,10 @@ import multiprocessing as mp
 from dlat import dlasearch
 from dlat import constants
 
+# set expection for healpix or uniqpix
+healpix_mountains = np.array(['iron','jura','kibo','loa'])
+uniqpix_mountains = np.array(['matterhorn', 'nevis'])
+
 def timestamp():
     """ 
     return current time in YYYY-MM-DD HH:MM:SS format
@@ -120,7 +124,18 @@ def main(args=None):
     if args.mocks:
         catalog = read_mock_catalog(args.qsocat, args.balmask, args.mockdir)
     else:
-        catalog = read_catalog(args.qsocat, args.balmask, args.tilebased)
+        # set data path and expected healpix keyword based on release name
+        if np.any(args.release == healpix_mountains):
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+            pix_keyword = 'HPXPIXEL'
+        elif np.any(args.release == uniqpix_mountains):
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
+            pix_keyword = 'UNIQPIXEL'
+        else:
+            print(f"{timestamp()} - Warning: {args.release} not recognized as an existing reduction. UNIQPIX structure will be assumed")
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
+            pix_keyword = 'UNIQPIXEL'
+        catalog = read_catalog(args.qsocat, pix_keyword, args.balmask, args.tilebased)
     
     if args.model is None:
         # locate default model file in repo
@@ -142,9 +157,9 @@ def main(args=None):
         print(f"{timestamp()} - Warning: nproc set to {args.nproc}, multiprocessing disabled")
 
     if not(args.tilebased) and not(args.mocks):
-        
-        # healpix list
-        unihpx = np.unique(catalog['HPXPIXEL'])
+
+        # create uniqpix/healpix list
+        unihpx = np.unique(catalog[pix_keyword])
         # process in batches to allow intermediate caching
         if len(unihpx) < 10:
             groups = 1
@@ -152,8 +167,6 @@ def main(args=None):
         else:
             groups = 10
             group_step = int(np.ceil(len(unihpx)/groups))
-
-        datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
    
         if args.nproc == 1:
             
@@ -169,7 +182,7 @@ def main(args=None):
                     
                     for hpx in unihpx[iini:ifin]:
                         group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
-                                                                     catalog[catalog['HPXPIXEL'] == hpx], 
+                                                                     catalog[catalog[pix_keyword] == hpx], 
                                                                      fluxmodel))
 
                     # remove extra column from hpx with no detections
@@ -186,7 +199,7 @@ def main(args=None):
                        "survey": args.survey, \
                        "program": args.program, \
                        "datapath": datapath, \
-                       "hpxcat": catalog[catalog['HPXPIXEL'] == hpx], \
+                       "pixcat": catalog[catalog[pix_keyword] == hpx], \
                        "model": fluxmodel, \
                        } for ih,hpx in enumerate(unihpx)]
         
@@ -369,13 +382,14 @@ def main(args=None):
     print(f'{timestamp()} - SUCCESS')
     print(f'total run time: {np.round(total_time/60,1)} minutes')
 
-def read_catalog(qsocat, balmask, bytile):
+def read_catalog(qsocat, pix_keyword, balmask, bytile):
     """
     read quasar catalog
 
     Arguments
     ---------
     qsocat (str) : path to quasar catalog
+    pix_keyword (str) : name of healpix column; must be either UNIQPIX or HPXPIX
     balmask (bool) : should BAL attributes from baltools be read in?
     bytile (bool) : catalog is tilebased, default assumption is healpix
     
@@ -385,10 +399,14 @@ def read_catalog(qsocat, balmask, bytile):
 
     """
 
+    if not(np.any(pix_keyword == np.array(['UNIQPIX','HPXPIXEL']))):
+        print(f'{timestamp()} - Critical Error: unexpected healpix keyword passed to read_catalog')
+        exit(1)
+
     if balmask:
         try:
             # read the following columns from qsocat
-            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'HPXPIXEL', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
+            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword, 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
             if bytile:
                 cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450',
                         'VMAX_CIV_450']
@@ -398,7 +416,7 @@ def read_catalog(qsocat, balmask, bytile):
             exit(1)
     else:
         # read the following columns from qsocat
-        cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'HPXPIXEL']
+        cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword]
         if bytile:
             cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC']
         catalog = Table(fitsio.read(qsocat, ext=1, columns=cols))
