@@ -167,6 +167,9 @@ def main(args=None):
         else:
             groups = 10
             group_step = int(np.ceil(len(unihpx)/groups))
+
+        # track whether file was written
+        group_exists = np.zeros(groups, dtype=bool)
    
         if args.nproc == 1:
             
@@ -178,21 +181,26 @@ def main(args=None):
                 iini = g*group_step
                 ifin = min((g+1)*group_step, len(unihpx))
 
-                if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
+                if os.path.exists(outfile):
+                    group_exists[g] = True
+                    continue
+                if unihpx[iini:ifin].shape[0] == 0:
+                    continue
                     
-                    for hpx in unihpx[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
-                                                                     catalog[catalog[pix_keyword] == hpx], 
-                                                                     fluxmodel))
+                for hpx in unihpx[iini:ifin]:
+                    group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
+                                                                 catalog[catalog[pix_keyword] == hpx], 
+                                                                 fluxmodel))
 
-                    # remove extra column from hpx with no detections
-                    group_results = vstack(group_results)
-                    if 'col0' in group_results.columns:
-                        group_results.remove_column('col0')
+                # remove extra column from hpx with no detections
+                group_results = vstack(group_results)
+                if 'col0' in group_results.columns:
+                    group_results.remove_column('col0')
 
-                    # write tmp file
-                    if len(group_results) != 0:
-                        group_results.write(outfile)
+                # write tmp file
+                if len(group_results) != 0:
+                    group_results.write(outfile)
+                    group_exists[g] = True
 
         if args.nproc > 1: 
             arguments = [ {"healpix": hpx , \
@@ -212,56 +220,71 @@ def main(args=None):
                     iini = g*group_step
                     ifin = min((g+1)*group_step, len(unihpx))
 
-                    if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
+                    if os.path.exists(outfile):
+                        group_exists[g] = True
+                        continue
+                    if unihpx[iini:ifin].shape[0] == 0:
+                        continue
 
-                        results = pool.map(_dlasearchhpx, arguments[iini:ifin])
-                        
-                        # remove extra column from hpx with no detections
-                        results = vstack(results)
-                        if 'col0' in results.columns:
-                            results.remove_column('col0')
-                        
-                        # write tmp file
-                        if len(results) != 0:
-                            results.write(outfile)
+                    results = pool.map(_dlasearchhpx, arguments[iini:ifin])
+                    
+                    # remove extra column from hpx with no detections
+                    results = vstack(results)
+                    if 'col0' in results.columns:
+                        results.remove_column('col0')
+                    
+                    # write tmp file
+                    if len(results) != 0:
+                        results.write(outfile)
+                        group_exists[g] = True
 
         # combine all batches into final catalog
-        fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups):
-            if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))):
-                print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-            else:
-                gresults = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'), ext=1))
-                fin_results = vstack([fin_results,gresults])
-            
-        # split into good and flagged catalogs
-        good_mask = fin_results['DLAFLAG'] == 0
-        fin_results_good = fin_results[good_mask]
-        fin_results_flagged = fin_results[~good_mask]
-
-        # set extension name
-        fin_results_good.meta['EXTNAME'] = 'DLACAT'
-        fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
-
-        # remove DLAFLAG column from good catalogs
-        fin_results_good.remove_column('DLAFLAG')
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
-        fin_results_good.write(outfile, overwrite=True)
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
-        fin_results_flagged.write(outfile, overwrite=True)
-
-        # remove temporary files
+        fin_results = None
         for g in np.arange(groups):
-            if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')):
-                os.remove(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))
-            else:
+            chunkfile = os.path.join(args.outdir, f'{args.outfile}-chunk{g}-tmp.fits')
+            if not group_exists[g]:
+                continue  # group was empty, nothing to combine
+            if not os.path.exists(chunkfile):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
+                continue
+            gresults = Table(fitsio.read(chunkfile, ext=1))
+            fin_results = gresults if fin_results is None else vstack([fin_results, gresults])
+
+        if fin_results is None:
+            print(f'{timestamp()} - Warning: no DLA detections found across any group; no catalog written')
+        else:
+    
+            # split into good and flagged catalogs
+            good_mask = fin_results['DLAFLAG'] == 0
+            fin_results_good = fin_results[good_mask]
+            fin_results_flagged = fin_results[~good_mask]
+    
+            # set extension name
+            fin_results_good.meta['EXTNAME'] = 'DLACAT'
+            fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
+    
+            # remove DLAFLAG column from good catalogs
+            fin_results_good.remove_column('DLAFLAG')
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
+            fin_results_good.write(outfile, overwrite=True)
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
+            fin_results_flagged.write(outfile, overwrite=True)
+    
+            # remove temporary files
+            for g in range(groups):
+                chunkfile = os.path.join(args.outdir, f'{args.outfile}-chunk{g}-tmp.fits')
+                if not group_exists[g]:
+                    continue  # nothing to clean up
+                if os.path.exists(chunkfile):
+                    os.remove(chunkfile)
+                else:
+                    print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
 
 
     # place holder until tile-based developed
@@ -285,6 +308,9 @@ def main(args=None):
             groups = 10
             group_step = int(np.ceil(len(speclist)/groups))
 
+        # track whether file was written
+        group_exists = np.zeros(groups, dtype=bool)
+        
         if args.nproc == 1:
             for g in np.arange(0, groups):
             
@@ -294,19 +320,24 @@ def main(args=None):
                 iini = g*group_step
                 ifin = min((g+1)*group_step, len(speclist))
 
-                if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
+                if os.path.exists(outfile):
+                    group_exists[g] = True
+                    continue
+                if len(speclist[iini:ifin]) == 0:
+                    continue
 
-                    for specfile in speclist[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel))
+                for specfile in speclist[iini:ifin]:
+                    group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel))
 
-                    # remove extra column from spec groups with no detections
-                    group_results = vstack(group_results)
-                    if 'col0' in group_results.columns:
-                        group_results.remove_column('col0')
+                # remove extra column from spec groups with no detections
+                group_results = vstack(group_results)
+                if 'col0' in group_results.columns:
+                    group_results.remove_column('col0')
 
-                    # write tmp file
-                    if len(group_results) != 0:
-                        group_results.write(outfile)
+                # write tmp file
+                if len(group_results) != 0:
+                    group_results.write(outfile)
+                    group_exists[g] = True
 
         if args.nproc > 1:
             arguments = [ {"specfile": specfile , \
@@ -323,59 +354,74 @@ def main(args=None):
                     iini = g*group_step
                     ifin = min((g+1)*group_step, len(speclist))
 
-                    if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
+                    if os.path.exists(outfile):
+                        group_exists[g] = True
+                        continue
+                    if len(speclist[iini:ifin]) == 0:
+                        continue
 
-                        results = list(pool.map(_dlasearchmock, arguments[iini:ifin]))
+                    results = list(pool.map(_dlasearchmock, arguments[iini:ifin]))
 
-                        # remove extra column from hpx with no detections
-                        results = vstack(results)
-                        if 'col0' in results.columns:
-                            results.remove_column('col0')
+                    # remove extra column from hpx with no detections
+                    results = vstack(results)
+                    if 'col0' in results.columns:
+                        results.remove_column('col0')
 
-                        # write tmp file
-                        if len(results) != 0:
-                            results.write(outfile)
+                    # write tmp file
+                    if len(results) != 0:
+                        results.write(outfile)                            
+                        group_exists[g] = True
 
         # combine all batches into final catalog
-        fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups):
-            if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))):
-                print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-            else:
-                gresults = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'), ext=1))
-                fin_results = vstack([fin_results,gresults])
-
-        # split into good and flagged catalogs
-        good_mask = fin_results['DLAFLAG'] == 0
-        fin_results_good = fin_results[good_mask]
-        fin_results_flagged = fin_results[~good_mask]
-        
-        # remove DLAFLAG column from good catalogs
-        fin_results_good.remove_column('DLAFLAG')
-
-        # set extension name
-        fin_results_good.meta['EXTNAME'] = 'DLACAT'
-        fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
-        fin_results_good.write(outfile, overwrite=True)
-        print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
-        fin_results_flagged.write(outfile, overwrite=True)
-        print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
-
-        # remove temporary files
+        fin_results = None
         for g in np.arange(groups):
-            if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')):
-                os.remove(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))
-            else:
+            chunkfile = os.path.join(args.outdir, f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
+            if not group_exists[g]:
+                continue  # group was empty, nothing to combine
+            if not os.path.exists(chunkfile):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
+                continue
+            gresults = Table(fitsio.read(chunkfile, ext=1))
+            fin_results = gresults if fin_results is None else vstack([fin_results, gresults])
 
+        if fin_results is None:
+            print(f'{timestamp()} - Warning: no DLA detections found across any group; no catalog written')
+        else:
+
+            # split into good and flagged catalogs
+            good_mask = fin_results['DLAFLAG'] == 0
+            fin_results_good = fin_results[good_mask]
+            fin_results_flagged = fin_results[~good_mask]
+            
+            # remove DLAFLAG column from good catalogs
+            fin_results_good.remove_column('DLAFLAG')
+    
+            # set extension name
+            fin_results_good.meta['EXTNAME'] = 'DLACAT'
+            fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
+            fin_results_good.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
+            fin_results_flagged.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
+    
+            # remove temporary files
+            for g in range(groups):
+                chunkfile = os.path.join(args.outdir, f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
+                if not group_exists[g]:
+                    continue  # nothing to clean up
+                if os.path.exists(chunkfile):
+                    os.remove(chunkfile)
+                else:
+                    print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
+                    
     tfin = time.time()
     total_time = tfin-tini
 
