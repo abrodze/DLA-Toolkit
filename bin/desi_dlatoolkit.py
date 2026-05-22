@@ -27,6 +27,14 @@ uniqpix_mountains = np.array(['matterhorn', 'nevis'])
 def timestamp():
     """ 
     return current time in YYYY-MM-DD HH:MM:SS format
+    
+    Arguments
+    ---------
+    None
+
+    Returns
+    -------
+    (str) : current timestamp formatted as YYYY-MM-DD HH:MM:SS
     """
     now = datetime.datetime.now()
     return(now.strftime("%Y-%m-%d %H:%M:%S"))
@@ -53,14 +61,11 @@ def parse(options=None):
     parser.add_argument('--mockdir', type = str, default = None, required = False,
                         help='path to mock directory')
     
-    parser.add_argument('--tilebased', default = False, required = False, action='store_true',
-                        help='use tile based coadds, default is False')
-    
     parser.add_argument('-m', '--model', type = str, default = None , required = False,
                         help='path to intrinsic flux model, defaults to v1.1 Redrock QSO_HIZ')
 
     parser.add_argument('--varlss', type = str, default = None, required = False,
-                        help='path to LSS variance input files, defaults to iron LSS variance')
+                        help='path to LSS variance input files, defaults to jura LSS variance')
 
     parser.add_argument('--balmask', default = False, required = False, action='store_true',
                         help='should BALs be masked using AI_CIV? Default is False but recommended setting is True')
@@ -92,7 +97,7 @@ def main(args=None):
         print(f"{timestamp()} - Critical Error: {args.qsocat} does not exist")
         exit(1)
     # if catalog is healpix based, we must have program & survey
-    if not(args.tilebased) and not(args.mocks):
+    if not(args.mocks):
         print(f"{timestamp()} - Warning: expecting healpix catalog for redux={args.release}, survey={args.survey}, program={args.program}; confirm this matches the catalog provided!")
     # confirm bal masking choice
     if not(args.balmask):
@@ -135,7 +140,7 @@ def main(args=None):
             print(f"{timestamp()} - Warning: {args.release} not recognized as an existing reduction. UNIQPIX structure will be assumed")
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
             pix_keyword = 'UNIQPIXEL'
-        catalog = read_catalog(args.qsocat, pix_keyword, args.balmask, args.tilebased)
+        catalog = read_catalog(args.qsocat, pix_keyword, args.balmask)
     
     if args.model is None:
         # locate default model file in repo
@@ -156,7 +161,7 @@ def main(args=None):
     if args.nproc == 1:
         print(f"{timestamp()} - Warning: nproc set to {args.nproc}, multiprocessing disabled")
 
-    if not(args.tilebased) and not(args.mocks):
+    if not(args.mocks):
 
         # create uniqpix/healpix list
         unihpx = np.unique(catalog[pix_keyword])
@@ -285,13 +290,6 @@ def main(args=None):
                     os.remove(chunkfile)
                 else:
                     print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-
-
-    # place holder until tile-based developed
-    elif args.tilebased:
-        # TO DO : process in batches to add caching
-        print(f'{timestamp()} - Critical Error: tile based capability does not exist')
-        exit(1)
 
     elif args.mocks:
         
@@ -428,20 +426,19 @@ def main(args=None):
     print(f'{timestamp()} - SUCCESS')
     print(f'total run time: {np.round(total_time/60,1)} minutes')
 
-def read_catalog(qsocat, pix_keyword, balmask, bytile):
+def read_catalog(qsocat, pix_keyword, balmask):
     """
     read quasar catalog
 
     Arguments
     ---------
     qsocat (str) : path to quasar catalog
-    pix_keyword (str) : name of healpix column; must be either UNIQPIX or HPXPIX
+    pix_keyword (str) : name of healpix column; must be either UNIQPIX or HPXPIXEL
     balmask (bool) : should BAL attributes from baltools be read in?
-    bytile (bool) : catalog is tilebased, default assumption is healpix
     
     Returns
     -------
-    table of relevant attributes for z>2 quasars
+    table of relevant attributes for quasars in default redshift range set by constants.py
 
     """
 
@@ -453,9 +450,6 @@ def read_catalog(qsocat, pix_keyword, balmask, bytile):
         try:
             # read the following columns from qsocat
             cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword, 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
-            if bytile:
-                cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450',
-                        'VMAX_CIV_450']
             catalog = Table(fitsio.read(qsocat, ext=1, columns=cols))
         except:
             print(f'{timestamp()} - Critical Error: cannot find {cols} in quasar catalog')
@@ -463,8 +457,6 @@ def read_catalog(qsocat, pix_keyword, balmask, bytile):
     else:
         # read the following columns from qsocat
         cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword]
-        if bytile:
-            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC']
         catalog = Table(fitsio.read(qsocat, ext=1, columns=cols))
 
     print(f'{timestamp()} - Successfully read quasar catalog: {qsocat}')
