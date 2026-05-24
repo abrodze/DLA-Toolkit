@@ -289,11 +289,13 @@ def main(args=None):
             if os.path.isfile(outfile):
                 print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
             fin_results_good.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
     
             outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
             if os.path.isfile(outfile):
                 print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
             fin_results_flagged.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
     
             # remove temporary files
             for g in range(groups):
@@ -425,6 +427,7 @@ def main(args=None):
             print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
     
             # remove temporary files
+            print(f'{timestamp()} - removing tmp files')
             for g in range(groups):
                 chunkfile = os.path.join(args.outdir, f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
                 if not group_exists[g]:
