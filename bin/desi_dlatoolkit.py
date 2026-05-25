@@ -76,8 +76,8 @@ def parse(options=None):
     parser.add_argument('--outfile', type = str, default = None, required = True,
                         help='name for output FITS file containing DLA catalog')
 
-    parser.add_argument('-n', '--nproc', type = int, default=64, required=False, 
-                        help='number of multiprocressing processes to use, default is 64')
+    parser.add_argument('-n', '--nproc', type = int, default=128, required=False, 
+                        help='number of multiprocressing processes to use, default is 128')
 
     parser.add_argument('--dir_type', type = str, default = None, required = False,
                         help='explicit directory tree type (e.g., healpix or uniqpix), \
@@ -222,6 +222,11 @@ def main(args=None):
                     group_exists[g] = True
 
         if args.nproc > 1: 
+
+            # check if nproc is under-subscribed and adjust if necessary
+            if group_step < args.nproc:
+                args.nproc = group_set
+            
             arguments = [ {"healpix": hpx , \
                        "survey": args.survey, \
                        "program": args.program, \
@@ -354,6 +359,11 @@ def main(args=None):
                     group_exists[g] = True
 
         if args.nproc > 1:
+
+            # check if nproc is under-subscribed and adjust if necessary
+            if group_step < args.nproc:
+                args.nproc = group_set
+                
             arguments = [ {"specfile": specfile , \
                        "catalog": catalog, \
                        "model": fluxmodel, \
