@@ -112,16 +112,6 @@ def dlasearch_mock(specfile, catalog, model):
     t0 = time.time()
 
     if os.path.exists(specfile):
-    
-        # open spectra file fibermap only
-        fm = desispec.io.read_fibermap(specfile)
-    
-        # pare catalog to match spectra file fibermap
-        tidmask = np.isin(catalog['TARGETID'], fm['TARGETID'])
-        catalog = catalog[tidmask]
-        if len(catalog) < 1:
-            # no objects
-            return()
 
         fitresults = process_spectra_group(specfile, catalog, model, True)
 

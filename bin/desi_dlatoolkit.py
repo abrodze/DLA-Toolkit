@@ -306,9 +306,8 @@ def main(args=None):
         
         datapath = f'{args.mockdir}/spectra-16'
 
-        speclist = glob.glob(f'{datapath}/*/*/spectra-16*.fits')
-
-        unipx, counts = np.unique(healpy.ang2pix(16, catalog['RA'], catalog['DEC'] , lonlat=True, nest=True), return_count=True)
+        mock_healpix_list = healpy.ang2pix(16, catalog['RA'], catalog['DEC'] , lonlat=True, nest=True)
+        unihpx, counts = np.unique(mock_healpix_list, return_counts=True)
         # sort the catalog by expected workload per healpix
         unihpx = unihpx[np.argsort(-counts)]
         speclist = [f'{datapath}/{u//100}/{u}/spectra-16-{u}.fits' for u in unihpx]
@@ -339,8 +338,10 @@ def main(args=None):
                 if len(speclist[iini:ifin]) == 0:
                     continue
 
-                for specfile in speclist[iini:ifin]:
-                    group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel))
+                for i,specfile in enumerate(speclist[iini:ifin]):
+                    u = unihpx[iini:ifin][g*i+i]
+                    cat_mask = mock_healpix_list == u
+                    group_results.append(dlasearch.dlasearch_mock(specfile, catalog[cat_mask], fluxmodel))
 
                 # remove extra column from spec groups with no detections
                 group_results = vstack(group_results)
@@ -359,7 +360,7 @@ def main(args=None):
                 args.nproc = group_step
                 
             arguments = [ {"specfile": specfile , \
-                       "catalog": catalog, \
+                       "catalog": catalog[mock_healpix_list == unihpx[ih]] , \
                        "model": fluxmodel, \
                        } for ih,specfile in enumerate(speclist) ]
             
