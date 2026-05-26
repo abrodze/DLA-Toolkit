@@ -129,7 +129,7 @@ def main(args=None):
         catalog = read_mock_catalog(args.qsocat, args.balmask, args.mockdir)
     else:
         # set data path and expected healpix keyword 
-        args.dir_type.upper()
+        args.dir_type = args.dir_type.upper()
         if (args.dir_type == 'HPXPIXEL') or (args.dir_type == 'HEALPIXEL'):
             pix_keyword = 'HPXPIXEL'
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
@@ -170,11 +170,11 @@ def main(args=None):
         unihpx = unihpx[np.argsort(-counts)]
         
         # process in batches to allow intermediate caching
-        if len(unihpx) < 5:
+        if len(unihpx) < 3:
             groups = 1
             group_step = len(unihpx)
         else:
-            groups = 5
+            groups = 3
             group_step = int(np.ceil(len(unihpx)/groups))
 
         # track whether file was written
@@ -313,11 +313,11 @@ def main(args=None):
         speclist = [f'{datapath}/{u//100}/{u}/spectra-16-{u}.fits' for u in unihpx]
         
         # process in batches to allow intermediate caching
-        if len(speclist) < 5:
+        if len(speclist) < 3:
             groups = 1
             group_step = len(speclist)
         else:
-            groups = 5
+            groups = 3
             group_step = int(np.ceil(len(speclist)/groups))
 
         # track whether file was written
