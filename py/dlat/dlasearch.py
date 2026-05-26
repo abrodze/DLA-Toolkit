@@ -9,8 +9,6 @@ import os
 import fitsio
 from astropy.table import Table, vstack
 
-import multiprocessing as mp
-from functools import partial
 import time 
 import datetime
 
@@ -29,30 +27,44 @@ import warnings
 from scipy.optimize import OptimizeWarning
 warnings.simplefilter("error", OptimizeWarning)
 
+# all spectra use the same column density range to search for DLAs
+# define globally here
+nhiscan = np.arange(constants.nhimin, constants.nhimax, 0.2) # must allow subDLA NHI to avoid FPs
+nhirefine = np.arange(constants.nhimin, constants.nhimax, 0.05)
+nhi_factors = 10.**nhiscan
+nhi_refine_factors = 10.**nhirefine
+
 
 def timestamp():
     """ 
     return current time in YYYY-MM-DD HH:MM:SS format
+    
+    Arguments
+    ---------
+    None
+
+    Returns
+    -------
+    (str) : current timestamp formatted as YYYY-MM-DD HH:MM:SS
     """
     now = datetime.datetime.now()
     return(now.strftime("%Y-%m-%d %H:%M:%S"))
 
 
-def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model, nproc):
+def dlasearch_hpx(healpix, survey, program, datapath, pixcat, model):
     """
     Find the best fitting DLA profile(s) for spectra in hpx catalog
 
     Arguments
     ---------
-    healpix (int) : N64 healpix
+    healpix (int) : healpixel number, agnostic to nside
     survey (str) : e.g., main, sv1, sv2, etc.
     program (str) : e.g., bright, dark, etc.
     datapath (str) : path to coadd files
-    hpxcat (table) : collection of spectra to search for DLAs, all belonging to
+    pixcat (table) : collection of spectra to search for DLAs, all belonging to
                      single healpix
     model (dict) : flux model dictionary containing 'PCA_WAVE', 'PCA_COMP', 'IGM',
                     'VAR_FUNC_LYA', and 'VAR_FUNC_LYB' keys
-    nproc (int) : number of multiprocessing processes for solve_DLA, default=64
 
     Returns
     -------
@@ -61,22 +73,13 @@ def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model, nproc):
 
     t0 = time.time()
    
-    # read spectra from healpix
+    # read spectra from healpixel
     coaddname = f'coadd-{survey}-{program}-{str(healpix)}.fits'
     coadd = os.path.join(datapath, str(healpix//100), str(healpix), coaddname)
 
     if os.path.exists(coadd):
 
-        # set up pool
-        if nproc > 1:
-            pool = mp.Pool(nproc)
-        else:
-            pool = None
-
-        fitresults = process_spectra_group(coadd, hpxcat, model, False, pool)
-
-        if nproc > 1:
-            pool.close()
+        fitresults = process_spectra_group(coadd, pixcat, model, False)
 
     else:
         print(f'{timestamp()} - Warning: could not locate coadd file for healpix {healpix}')
@@ -85,50 +88,14 @@ def dlasearch_hpx(healpix, survey, program, datapath, hpxcat, model, nproc):
 
     t1 = time.time()
     total = np.round(t1-t0,2)
-    print(f'{timestamp()} - Completed processing of {len(hpxcat)} spectra from healpix {healpix} in {total}s')
+    print(f'{timestamp()} - Completed processing of {len(pixcat)} spectra from healpix {healpix} in {total}s')
 
     return fitresults
     
 
-def dlasearch_tile(tileid, datapath, tilecat, model, nproc):
+def dlasearch_mock(specfile, catalog, model):
     """
-    Find the best fitting DLA profile(s) for spectra in hpx catalog
-
-    Arguments
-    ---------
-    tileid (int) : tile no.
-    datapath (str) : path to coadd files
-    tilecat (table) : collection of spectra to search for DLAs, all belonging to
-                     single tile
-    model (dict) : flux model dictionary containing 'PCA_WAVE', 'PCA_COMP', 'IGM',
-                    'VAR_FUNC_LYA', and 'VAR_FUNC_LYB' keys
-    nproc (int) : number of multiprocessing processes for solve_DLA, default=64
-
-    Returns
-    -------
-    fitresults (table) : fit attributes for detected DLAs
-    """
-
-    t0 = time.time()
-
-    # do tile based search, will need to save tileid in catalog since targetid is not unique to a tile
-    # call process_spectra_group, append tileid and petal id to fitresults
-    # loop over petal number
-
-    # e.g. for petal in np.unique(tilecat['PETAL_LOC']):
-    #           petcat = tilecat[tilecat['PETAL_LOC'] == petal]
-    #           coadd = 'path to tile-petal coadd'
-    #           #check if pool should be set up
-    #           process_spectr_group(coadd, petcat, model, pool)
-    #           # apeend tile and petal columns
-
-    t1 = time.time()
-    total = t1-t0
-    print(f'{timestamp()} - Completed processing of {len(tilecat)} spectra from tile {tileid} in {total}s')
-
-def dlasearch_mock(specfile, catalog, model, nproc):
-    """
-    function description
+    Find the best fitting DLA profile(s) for spectra in mock spectra file
 
     Arguments
     ---------
@@ -136,7 +103,6 @@ def dlasearch_mock(specfile, catalog, model, nproc):
     catalog (table) : catalog of spectra to search for DLAs
     model (dict) : flux model dictionary containing 'PCA_WAVE', 'PCA_COMP', 'IGM',
                     'VAR_FUNC_LYA', and 'VAR_FUNC_LYB' keys
-    nproc (int) : number of multiprocessing processes for solve_DLA, default=64
 
     Returns
     -------
@@ -146,27 +112,8 @@ def dlasearch_mock(specfile, catalog, model, nproc):
     t0 = time.time()
 
     if os.path.exists(specfile):
-    
-        # open spectra file fibermap only
-        fm = desispec.io.read_fibermap(specfile)
-    
-        # pare catalog to match spectra file fibermap
-        tidmask = np.in1d(catalog['TARGETID'], fm['TARGETID'])
-        catalog = catalog[tidmask]
-        if len(catalog) < 1:
-            # no objects
-            return()
 
-        # set up pool
-        if nproc > 1:
-            pool = mp.Pool(nproc)
-        else:
-            pool = None
-
-        fitresults = process_spectra_group(specfile, catalog, model, True, pool)
-
-        if nproc > 1:
-            pool.close()
+        fitresults = process_spectra_group(specfile, catalog, model, True)
 
     else:
         print(f'{timestamp()} - Warning: could not locate coadd file: {specfile}')
@@ -180,7 +127,7 @@ def dlasearch_mock(specfile, catalog, model, nproc):
     return fitresults
 
 
-def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
+def process_spectra_group(coaddpath, catalog, model, is_mock=False):
     """
     pre-process group of spectra in same file and run DLA searching tools
 
@@ -188,8 +135,9 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
     ---------
     coaddpath (str) : path to file containing spectra
     catalog (table) : collection of spectra in file to search for DLAs
-    model (dict) : flux model containing 'PCA_WAVE', 'PCA_COMP', and 'IGM' keys
-    pool : shared mp pool
+    model (dict) : flux model containing 'PCA_WAVE', 'PCA_COMP', 'IGM',
+                    'VAR_FUNC_LYA', and 'VAR_FUNC_LYB' keys
+    is_mock (bool) : True if processing mock spectra file
 
     Returns
     -------
@@ -231,6 +179,9 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
     tidlist, ralist, declist, zqsolist, bluesnrlist, redsnrlist, dlaidlist = [], [], [], [], [], [], []
     zlist, nhilist, dchi2list, zerrlist, nhierrlist, fitwarnlist, coefflist = [], [], [], [], [], [], []
 
+    # create tid to index mapping
+    tid_to_idx = {tid: i for i, tid in enumerate(np.asarray(specobj.fibermap['TARGETID']))}
+
     # for each entry in passed catalog, fit spectrum with intrinsic model + N DLA
     for entry in range(len(catalog)):
 
@@ -244,10 +195,9 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
             dec = catalog['DEC'][entry]
         zqso = catalog['Z'][entry]
 
-        try:
-            idx = np.nonzero(specobj.fibermap['TARGETID']==tid)[0][0]
-        except:
-            print(f'{timestamp()} - Error: Targetid {tid} NOT FOUND on healpix {healpix}')
+        idx = tid_to_idx.get(tid)
+        if idx is None:
+            print(f'{timestamp()} - Error: Targetid {tid} NOT FOUND on {coaddpath}')
             continue
 
         flux = specobj.flux['brz'][idx]
@@ -258,20 +208,23 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
         fitmask = wave_rf > constants.search_minlam
 
         # limit our bestfit comparision w/ and w/o DLAs to search region of spectrum
-        searchmask = np.ma.masked_inside(wave_rf[fitmask], constants.search_minlam, constants.search_maxlam).mask
+        searchmask = (wave_rf[fitmask] >= constants.search_minlam) & (wave_rf[fitmask] <= constants.search_maxlam)
         
         # apply mask to BAL features, if available
-        if 'NCIV_450' in catalog.columns:
+        # initialize as no BALs
+        has_bal_info = 'NCIV_450' in catalog.columns
+        bal_locs, nbal = [], 0
+        if has_bal_info:
             nbal = catalog['NCIV_450'][entry]
-            bal_locs = []
             for n in range(nbal):
+                
                 # Compute velocity ranges
                 v_max = -catalog[entry]['VMAX_CIV_450'][n] / constants.c + 1.
                 v_min = -catalog[entry]['VMIN_CIV_450'][n] / constants.c + 1.
 
                 for line, lam in constants.bal_lines.items():
                     # Mask wavelengths within the velocity ranges
-                    mask = np.ma.masked_inside(wave_rf, lam*v_min, lam*v_max).mask
+                    mask = (wave_rf <= lam*v_min) & (wave_rf >= lam*v_max)
                     if (line == 'Lya') or (line == 'NV'):
                         rededge = (lam*v_min)*(1+zqso)
                         blueedge = (lam*v_max)*(1+zqso)
@@ -304,21 +257,39 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
         varlss[lyaregion] = varlss_lya[lyaregion]
         varlss[lybregion] = varlss_lyb[lybregion]
 
-        # model w/o DLAs
-        coeff_null, chi2dof_null  = fit_spectrum(wave[fitmask], flux[fitmask], ivar[fitmask], fitmodel, varlss[fitmask], searchmask)
+        var_pipe = np.zeros_like(ivar)
+        var_pipe[ivar != 0] = 1.0 / ivar[ivar != 0]
 
-        # add up to 3 DLAs to fit, no detections have [z,nhi,dchi] = [-1,0,0]
-        zdla, zerr, nhi, nhierr, dchi2, fitwarn, coeff_dla  = fit_spectrum_DLA(wave[fitmask], flux[fitmask], ivar[fitmask],
-                                                            fitmodel, varlss[fitmask], searchmask, zqso, chi2dof_null, pool)
+        # model w/o DLAs
+        coeff_null, chi2dof_null  = fit_spectrum(wave[fitmask], flux[fitmask], ivar[fitmask], var_pipe[fitmask], fitmodel, 
+                                                 varlss[fitmask], searchmask)
+
+        # add up to 3 DLAs to fit, no detections have [z, zerr, nhi, nhierr, dchi2] = [-1, inf, 0, inf, 0]
+        zdla, zerr, nhi, nhierr, dchi2, fitwarn, coeff_dla  = fit_spectrum_DLA(wave[fitmask], flux[fitmask], ivar[fitmask], var_pipe[fitmask],
+                                                            fitmodel, varlss[fitmask], searchmask, zqso, chi2dof_null)
 
         # check for potential BAL contamination in solution
         # false positive should only come from Lya and NV - all other lines too weak
-        if ('nbal' in locals()) & np.any(zdla != -1):
+        if (nbal > 0) & np.any(zdla != -1):
             lam_center_dla = constants.Lya_line*(1+zdla)
             for window in bal_locs:
                 balflag = (lam_center_dla < window[0]) & (lam_center_dla > window[1])
                 fitwarn[balflag] |= DLAFLAG.POTENTIAL_BAL
 
+        # average signal to noise computation
+        mask = (ivar != 0) & ((wave_rf >= constants.bluesnr_min) & (wave_rf <= constants.bluesnr_max))
+        # check for insufficent coverage and set to -1
+        if np.any(mask):
+            bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+        else:
+            bluesnr = -1
+        
+        mask = (ivar != 0) & ((wave_rf >= constants.redsnr_min) & (wave_rf <= constants.redsnr_max))
+        if np.any(mask):
+            redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
+        else:
+            redsnr = -1
+            
         ndla = np.sum(zdla != -1)
         for n in range(ndla):
             tidlist.append(tid)
@@ -334,20 +305,6 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
             dchi2list.append(dchi2[n])
             fitwarnlist.append(fitwarn[n])
             coefflist.append(coeff_dla[n])
-            
-            # average signal to noise computation
-            mask = np.logical_and(ivar != 0, np.ma.masked_inside(wave_rf, constants.bluesnr_min, constants.bluesnr_max).mask)
-            bluesnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-            
-            mask = np.logical_and(ivar != 0, np.ma.masked_inside(wave_rf, constants.redsnr_min, constants.redsnr_max).mask)
-            redsnr = np.mean((flux[mask]*np.sqrt(ivar[mask])))
-
-            # check for insufficent coverage and set to -1
-            if np.isinf(bluesnr) or np.isnan(bluesnr):
-                bluesnr = -1
-            if np.isinf(redsnr) or np.isnan(redsnr):
-                redsnr = -1
-
             bluesnrlist.append(bluesnr)
             redsnrlist.append(redsnr)
 
@@ -366,14 +323,15 @@ def process_spectra_group(coaddpath, catalog, model, is_mock=False, pool=None):
 
 def PCA_reconstruction_DLA(x, dla_params, eigvec, lam_obs):
     """
-    reconstruct spectrum with eigenspectra + DLA model
+    reconstruct spectrum with eigenspectra + DLA absorption model
 
     Arguments
     ---------
     x (array of floats) : coeff on eigenspectra, length of nvec
-    dla_params (array of floats) : (zdla, log10(NHI)) per DLA, length N_DLA X 2
+    dla_params (array of tuples) : list of tuples (zdla, log10(NHI)) for all DLAs;
+                                  if None, treated as no DLAs
     eigvec (2D array of floats) : array of eigenspectra, nvec x nlam
-    lam_obs (array of floats) : observed wave array in angstroms
+    lam_obs (array of floats) : observed wave array in angstroms, length nlam
 
     Returns
     -------
@@ -381,29 +339,37 @@ def PCA_reconstruction_DLA(x, dla_params, eigvec, lam_obs):
 
     """
 
-    # determine how many DLAs are in dla_param arguments
-    NDLA = int(len(dla_params)/2)
+    if dla_params is None:
+        dla_params = []
+    trans = np.ones_like(lam_obs)
+    for (z_s, nhi_s) in dla_params:
+        trans = trans * np.exp(
+            -(10.0 ** nhi_s) * dlaprofile.dla_tau_from_zdla(lam_obs, z_s))
 
-    # account for mean transmission of each DLA
-    z_idx, nhi_idx = 0, 1
-    DLA_transmission = np.ones(len(eigvec[0]))
-    for dla in range(NDLA):
-        DLA_transmission *= dlaprofile.dla_profile(lam_obs, dla_params[z_idx], dla_params[nhi_idx])
-        z_idx += 2
-        nhi_idx += 2
-
-    recon_spec = np.dot(x, DLA_transmission*eigvec)
+    recon_spec = np.dot(x, trans*eigvec)
 
     return(recon_spec)
 
 def parabola(x, a, b, c):
     """
-     z = z0 + ((x-x0)/xerr)^2
+    Parabola model for curve_fit, of the form y = a + ((x-b)/c)**2
+
+    Arguments
+    ---------
+    x (array of floats) : independent variable values
+    a (float) : minimum value of parabola (y-offset)
+    b (float) : x-position of parabola minimum
+    c (float) : width parameter (error-like scaling on x)
+
+    Returns
+    -------
+    y (array of floats) : parabola evaluated at x
     """
     return( a + ((x-b)/c)**2 )
 
 
-def _solve_DLA(ivar, flux, model_flux, varlss, wave, searchmask, return_coeff, dlaparams):
+def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, return_coeff, 
+                                 DLA_transmission, NDLA, maxiter=5):
     """
     fit spectrum with eigenspectra given a fixed DLA profile
 
@@ -412,11 +378,14 @@ def _solve_DLA(ivar, flux, model_flux, varlss, wave, searchmask, return_coeff, d
     ivar (array of floats) : inverse variance on observed flux
     flux (array of floats) : observed flux
     model_flux (2D array of floats) : eigenspectra model with dimension nvec X nlam
+    var_pipe (array of floats) : pipeline variance estimated from ivar
     varlss (array of floats) : LSS variance
     wave (array of floats) : observed wavelength (Angstroms)
     searchmask (array of bool) : DLA search window mask, dimensions nlam
     return_coeff (bool) : return coefficients of bestfit
-    dlaparams (array of floats) :  (zdla, log10(NHI)) per DLA, length N_DLA X 2
+    DLA_transmission (array of floats) :  precomputed transmission array to multiplied against model
+    NDLA (int) : number of DLAs being fit
+    maxiter (int): limit of var_lss optimization loop, set lower for coarse solve
 
     Returns
     -------
@@ -425,85 +394,177 @@ def _solve_DLA(ivar, flux, model_flux, varlss, wave, searchmask, return_coeff, d
                       by searchmask argument
     """
 
-    # determine how many DLAs are in dla_param arguments
-    NDLA = int(len(dlaparams)/2)
-
-    # account for mean transmission of each DLA
-    z_idx, nhi_idx = 0, 1
-    DLA_transmission = np.ones(len(model_flux[0]))
-    for dla in range(NDLA):
-        DLA_transmission *= dlaprofile.dla_profile(wave, dlaparams[z_idx], dlaparams[nhi_idx])
-        z_idx += 2
-        nhi_idx += 2
-
-    M = DLA_transmission*model_flux
-
     # mask ivar = 0 entries to avoid divide by zero error
     mask = ivar != 0
+    
+    # compute model with DLAs
+    M = (DLA_transmission*model_flux)[:,mask]
+    
     # assume only pipeline error contributes for first fit
     # lss contribution is model flux dependent - solved for below
-    w = ivar
-    nw = np.zeros(len(w))
-    dw = np.ones(len(w))
+    w_m = ivar.copy()
+    w_m = w_m[mask]
+    flux_m = flux[mask]
+    var_pipe_m = var_pipe[mask]
+    varlss_m = varlss[mask]
+    dw_max = 1.0
 
     niter = 0
-    while (np.max(dw) > 10e-4) and (niter < 5):
+        
+    while (dw_max > 10e-4) and (niter < maxiter):
         # linalg requires a and b are square matrices
         # also taking ivar weights into account
-        b = M[:,mask].dot( w[mask]*flux[mask] )
-        a = M[:,mask].dot( (M[:,mask] * w[mask]).T )
+        b = M.dot( w_m*flux_m )
+        a = M.dot( (M * w_m).T )
 
         coeff = np.linalg.solve(a,b)
         bestfit = np.dot(coeff,M)
 
         # adjust weights for LSS contribution
-        nw[mask] = 1./(ivar[mask]**-1 + varlss[mask]*bestfit[mask]**2)
-        dw[mask] = np.abs(w-nw)[mask]/w[mask]
-        dw[~mask] = 0.
-        w = nw
+        nw_m = 1.0 / (var_pipe_m + varlss_m * bestfit**2)
+        dw_max = np.max(np.abs(w_m - nw_m) / w_m)
+        w_m = nw_m
         niter += 1
 
     # get the chi2 of fit just in the region we are searching for DLAs
-    dof = np.sum(mask[searchmask]) - M.shape[0] - float(NDLA)
-    bestfit = np.dot(coeff,M)[mask&searchmask]
-    w = 1./(ivar[mask&searchmask]**-1  + varlss[mask&searchmask]*bestfit**2)
-    chi2 = np.sum(w * (flux[mask&searchmask] - bestfit)**2)
+    smask = mask&searchmask
+    dof = np.sum(mask[searchmask]) - model_flux.shape[0] - float(NDLA)
+    bestfit = coeff.dot((DLA_transmission*model_flux)[:, smask])
+    w = 1./(var_pipe[smask]  + varlss[smask]*bestfit**2)
+    chi2 = np.sum(w * (flux[smask] - bestfit)**2)
 
     if return_coeff:
         return(coeff, chi2/dof)
     else:
         return(chi2/dof)
 
+def _refined_scan_z(wave, ivar, flux, model_flux, var_pipe, varlss, searchmask,
+                    z_transmission_grid, fixed_nhi, fixed_trans, ndla_total):
+    """
+    Refined 1D chi2 scan over DLA redshift at fixed NHI, on top of a fixed
+    background transmission from previously solved DLAs
 
-def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi2null, pool=None):
+    Arguments
+    ---------
+    wave (array of floats) : observed wavelength in Angstroms
+    ivar (array of floats) : inverse variance on observed flux
+    flux (array of floats) : observed flux
+    model_flux (2D array of floats) : eigenspectra model with dimensions nvec x nlam
+    varlss (array of floats) : LSS variance
+    searchmask (array of bool) : DLA search window mask, dimensions nlam
+    z_transmission_grid (2D array of floats) : precomputed DLA optical depth (tau) per
+                                           redshift on observed wavelength grid,
+                                           dimensions nz x nlam
+    fixed_nhi (float) : log10 column density (cm^-2) of the DLA being scanned, held fixed
+    fixed_trans (array of floats) : background transmission from already-solved DLAs,
+                                    dimensions nlam
+    ndla_total (int) : total number of DLAs in the fit (including the one being scanned),
+                       used in degrees-of-freedom calculation
+
+    Returns
+    -------
+    chi2 (array of floats) : reduced chi2 evaluated at each redshift in zrefine
+    """
+    nhi_factor = 10.**fixed_nhi
+    trans = np.exp(-nhi_factor * z_transmission_grid) * fixed_trans
+    chi2 = np.empty(z_transmission_grid.shape[0])
+    for iz in range(z_transmission_grid.shape[0]):
+        chi2[iz] = _solve_DLA_with_transmission(
+            ivar, flux, model_flux, var_pipe, varlss, wave, searchmask,
+            False, trans[iz], ndla_total)
+    return(chi2)
+
+
+def _refined_scan_nhi(wave, ivar, flux, model_flux, var_pipe, varlss, searchmask,
+                      fixed_z, fixed_trans, ndla_total):
+    """
+    Refined 1D chi2 scan over DLA log10(NHI) at fixed redshift, on top of a fixed
+    background transmission from previously solved DLAs
+
+    Arguments
+    ---------
+    wave (array of floats) : observed wavelength in Angstroms
+    ivar (array of floats) : inverse variance on observed flux
+    flux (array of floats) : observed flux
+    model_flux (2D array of floats) : eigenspectra model with dimensions nvec x nlam
+    varlss (array of floats) : LSS variance
+    searchmask (array of bool) : DLA search window mask, dimensions nlam
+    fixed_z (float) : redshift of the DLA being scanned, held fixed
+    fixed_trans (array of floats) : background transmission from already-solved DLAs,
+                                    dimensions nlam
+    ndla_total (int) : total number of DLAs in the fit (including the one being scanned),
+                       used in degrees-of-freedom calculation
+
+    Returns
+    -------
+    chi2 (array of floats) : reduced chi2 evaluated at each NHI value in nhirefine
+    """
+    tau_at_z = dlaprofile.dla_tau_from_zdla(wave, fixed_z)
+    chi2 = np.empty(len(nhirefine))
+    trans = np.exp(-nhi_refine_factors[:, None] * tau_at_z[None, :]) * fixed_trans
+    for inhi in range(len(nhirefine)):
+        chi2[inhi] = _solve_DLA_with_transmission(
+            ivar, flux, model_flux, var_pipe, varlss, wave, searchmask,
+            False, trans[inhi], ndla_total)
+    return(chi2)
+
+def _build_fixed_trans(wave, solved_dlas):
+    """
+    Compute combined background transmission from an arbitrary number of DLAs
+
+    Arguments
+    ---------
+    wave (array of floats) : observed wavelength in Angstroms, length nlam
+    solved_dlas (list of tuples) : list of (zdla, log10(NHI)) tuples for previously
+                                   solved DLAs; may be empty
+
+    Returns
+    -------
+    fixed_trans (array of floats) : combined transmission profile from all DLAs in
+                                    solved_dlas, dimensions nlam; ones everywhere if
+                                    solved_dlas is empty
+    """
+    fixed_trans = np.ones_like(wave)
+    for (z_s, nhi_s) in solved_dlas:
+        fixed_trans = fixed_trans * np.exp(
+            -(10.0 ** nhi_s) * dlaprofile.dla_tau_from_zdla(wave, z_s))
+    return(fixed_trans)
+
+
+def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask, zqso, chi2null):
     """
     fit spectrum with eigenspectra model with up to 3 free DLA (zdla, nhi) profiles
 
     Arguments
     ---------
-    wave (array of floats) : observed wavelength (Angstroms)
+    wave (array of floats) : observed wavelength in Angstroms
     flux (array of floats) : observed flux
     ivar (array of floats) : inverse variance on observed flux
-    model_flux (2D array of floats) : eigenspectra model with dimension nvec X nlam
+    var_pipe (array of floats) : pipeline variance estimated from ivar
+    model_flux (2D array of floats) : eigenspectra model with dimensions nvec x nlam
     varlss (array of floats) : LSS variance
     searchmask (array of bool) : DLA search window mask, dimensions nlam
     zqso (float) : quasar redshift
-    chi2null (float) : reference chi2 of DLA-free model
-    pool : shared mp pool
+    chi2null (float) : reference reduced chi2 of the DLA-free model fit
 
     Returns
     -------
-    zdla_soln (array floats) : best fit DLA redshifts
-    zerr_soln (array of floats) : error on zdla estimated with parabola fit
-    nhi_soln (array of floats) : best fit log10 DLA column density (cm^-2)
-    nhierr_soln (array of floats) : error on nhi estimated with parabola fit
-    dchi_soln (array of floats) : difference in chi2 from best fit to previous best fit (null fit for 
-                        1st DLA) over range defined by searchmask argument
-    fitwarning (bitmask) : flags on solution
-    coeff_soln (array of floats) : coefficients on eigenspectra, dimensions nvec
+    zdla_soln (array of floats) : best fit DLA redshifts, length 3; -1 for no detection
+    zerr_soln (array of floats) : error on zdla estimated with parabola fit, length 3;
+                                  np.inf for no detection
+    nhi_soln (array of floats) : best fit log10 DLA column density (cm^-2), length 3;
+                                 0 for no detection
+    nhierr_soln (array of floats) : error on nhi estimated with parabola fit, length 3;
+                                    np.inf for no detection
+    dchi2_soln (array of floats) : chi2 improvement from each DLA relative to the
+                                   previous best fit (null fit for the 1st DLA),
+                                   evaluated over the searchmask region, length 3
+    fitwarning (array of int) : bitmask flags on each DLA solution, length 3
+    coeff_soln (2D array of floats) : coefficients on eigenspectra for each DLA solution,
+                                      dimensions 3 x nvec
     """
 
-    # no detection will give results of [z,zerr,nhi,nhierr,dchi2] = [-1,0,0,0,0]
+    # no detection will give results of [z, zerr, nhi, nhierr, dchi2] = [-1, inf, 0, inf, 0]
     zdla_soln = np.full(3,-1.)
     zerr_soln = np.full(3,np.inf)
     nhi_soln = np.full(3,0.)
@@ -517,15 +578,44 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
     # zmax = zqso - 3000 km/s
     zmin = max((constants.Lyinf/constants.Lya_line)*(1 + zqso) - 1 + 0.01, min(wave[searchmask])/constants.Lya_line - 1)
     zscan = np.linspace(zmin,zqso-0.01,int(np.ceil((zqso-zmin)/0.01)))
-    nhiscan = np.arange(constants.nhimin, constants.nhimax, 0.2) # must allow subDLA NHI to avoid FPs
+    # nhiscan and nhiscan_refine are the same for all objects, defined as global variable
 
-    # for multiprocessing
-    DLA_chi2_matrix = partial(_solve_DLA, ivar, flux, model_flux, varlss, wave, searchmask, False)
+    # precompute transmission grid for zscan and re-use throughout solves
+    tau_grid = np.empty((len(zscan), len(wave)))
+    for iz, z in enumerate(zscan):
+        tau_grid[iz] = dlaprofile.dla_tau_from_zdla(wave, z)
 
-    def refined_fit(z_bf_idx, nhi_bf_idx, ini_chi2, solved_dla):
+    def refined_fit(z_bf_idx, nhi_bf_idx, ini_chi2, solved_dlas):
+        """
+        Iteratively refine the best fit (z, NHI) for a single new DLA on top of any
+        previously solved DLAs, using alternating 1D parabola fits in z and NHI.
+
+        Arguments
+        ---------
+        z_bf_idx (int) : index of coarse-scan best fit redshift in zscan
+        nhi_bf_idx (int) : index of coarse-scan best fit log10(NHI) in nhiscan
+        ini_chi2 (float) : reduced chi2 value at the coarse-scan minimum, used as
+                           the initial guess for the parabola minimum/offset parameter
+        solved_dlas (list of tuples) : list of (z, log10(NHI)) tuples for already-fixed
+                                       DLAs; may be empty
+
+        Returns
+        -------
+        bestz (float) : refined best fit DLA redshift
+        zerr (float) : error on bestz estimated with parabola fit; np.inf if fit failed
+        bestnhi (float) : refined best fit log10 DLA column density (cm^-2)
+        nhierr (float) : error on bestnhi estimated with parabola fit; np.inf if fit failed
+        chi2dof (float) : reduced chi2 of the final refined fit over the searchmask region
+        fitwarn (int) : bitmask flags raised during the refined fit
+        coeff (array of floats) : coefficients on eigenspectra for the final fit,
+                                  dimensions nvec
+        """
 
         # initial flag with no warning
         fitwarn = 0
+        ndla_total = len(solved_dlas) + 1
+        # transmission vector from DLAs previously detected
+        fixed_trans = _build_fixed_trans(wave, solved_dlas)
 
         # check if fit solution relaxed to redshift boundary
         if z_bf_idx < (len(zscan)-1):
@@ -534,7 +624,11 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
         else: 
             # define refined search grid
             zrefine = np.arange(zscan[np.max([z_bf_idx-2, 0])], zscan[np.min([z_bf_idx+2, len(zscan)-1])]+0.001, 0.0025)
-        nhirefine = np.arange(constants.nhimin,constants.nhimax,0.05)
+
+        # precompute tau_refined grid since zrefine will not change
+        tau_refine_grid = np.empty((len(zrefine), len(wave)))
+        for iz, z in enumerate(zrefine):
+            tau_refine_grid[iz] = dlaprofile.dla_tau_from_zdla(wave, z)
 
         # define curve_fit boundaries
         zbounds = ([0, zrefine[0], 0], [np.inf, zrefine[-1], 10e4])
@@ -550,17 +644,9 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
         while (niter < 5) and (max(param_frac_change) > 10e-5):
 
             # refined solve for z, assuming nhi value
-            if solved_dla is not None:
-                test_params = [(z, last_bestnhi, *solved_dla) for z in zrefine]
-            else:
-                test_params = [(z, last_bestnhi) for z in zrefine]
+            zzchi2 = _refined_scan_z(wave, ivar, flux, model_flux, var_pipe, varlss, searchmask,
+                                     tau_refine_grid, last_bestnhi, fixed_trans, ndla_total)
 
-            if pool is None:
-                zzchi2 = []
-                for tp in test_params:
-                    zzchi2.append(DLA_chi2_matrix(tp))
-            else:
-                zzchi2 = pool.map(DLA_chi2_matrix, test_params)
                 
             # fit minima of refined search with parabola to find best fit z+zerr
             iniguess = np.array([ini_chi2, last_bestz, 0.1])
@@ -568,8 +654,9 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
             ini_idx = np.max([minpos-2, 0])
             fin_idx = np.min([minpos+3,len(zzchi2)])
             try:
-                popt, pcov = curve_fit(parabola, np.array(test_params)[:,0][ini_idx:fin_idx], zzchi2[ini_idx:fin_idx],
-                                  p0=iniguess, bounds=zbounds)
+                popt, pcov = curve_fit(parabola, zrefine[ini_idx:fin_idx],
+                                       zzchi2[ini_idx:fin_idx],
+                                       p0=iniguess, bounds=zbounds)
                 bestz = popt[1]
                 zerr = popt[2]
             except(ValueError,OptimizeWarning,RuntimeError):
@@ -578,17 +665,8 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
                 zerr = np.inf
 
             # refined solve for nhi, assuming z value
-            if solved_dla is not None:
-                test_params = [(bestz, nhi, *solved_dla) for nhi in nhirefine]
-            else:
-                test_params = [(bestz, nhi) for nhi in nhirefine]
-
-            if pool is None:
-                zzchi2 = []
-                for tp in test_params:
-                    zzchi2.append(DLA_chi2_matrix(tp))
-            else:
-                zzchi2 = pool.map(DLA_chi2_matrix, test_params)
+            zzchi2 = _refined_scan_nhi(wave, ivar, flux, model_flux, var_pipe, varlss, searchmask,
+                                       bestz, fixed_trans, ndla_total)
                 
             # fit minima of refined search with parabola to find best fit nhi+nhierr
             iniguess = np.array([ini_chi2, last_bestnhi, 1.])
@@ -596,8 +674,9 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
             ini_idx = np.max([minpos-2, 0])
             fin_idx = np.min([minpos+3,len(zzchi2)])
             try:
-                popt, pcov = curve_fit(parabola, np.array(test_params)[:,1][ini_idx:fin_idx], zzchi2[ini_idx:fin_idx],
-                              p0=iniguess, bounds=nhibounds)
+                popt, pcov = curve_fit(parabola, nhirefine[ini_idx:fin_idx], 
+                                       zzchi2[ini_idx:fin_idx],
+                                       p0=iniguess, bounds=nhibounds)
                 bestnhi = popt[1]
                 nhierr = popt[2]
             except(ValueError, OptimizeWarning,RuntimeError):
@@ -620,36 +699,38 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
         # also trigger a warning if the redshift solution is too close to ZQSO
         if bestz >= np.max(zscan):
             fitwarn |= DLAFLAG.ZBOUNDARY
-                
-        if solved_dla is not None:
-            coeff, chi2dof = _solve_DLA(ivar, flux, model_flux, varlss, wave, searchmask, True, 
-                                        (*solved_dla, bestz, bestnhi))
-        else:
-            coeff, chi2dof = _solve_DLA(ivar, flux, model_flux, varlss, wave, searchmask, True, (bestz, bestnhi))
+
+        # fit final solution 
+        all_dlas = list(solved_dlas) + [(bestz, bestnhi)]
+        final_trans = _build_fixed_trans(wave, all_dlas)
+        coeff, chi2dof = _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave, 
+                                                      searchmask, True, final_trans, ndla_total)
         
         return(bestz, zerr, bestnhi, nhierr, chi2dof, fitwarn, coeff)
 
 
-    # coarse solve
-    test_params = []
-    for z in zscan:
-        for nhi in nhiscan:
-            test_params.append((z,nhi))
+    # coarse solve - vectorized over NHI for each z
+    zchi2 = np.empty((len(zscan), len(nhiscan)))
+    
+    # Precompute fixed DLA transmission 
+    # For the 1st-DLA coarse scan, start with transmission = 1 everywhere
+    fixed_trans_0 = _build_fixed_trans(wave, [])
+    for iz in range(len(zscan)):
+        trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_0
+        for inhi in range(len(nhiscan)):
+            zchi2[iz, inhi] = _solve_DLA_with_transmission(
+                ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, 
+                trans_nhi[inhi], 1)
 
-    if pool is None:
-        zchi2 = []
-        for tp in test_params:
-            zchi2.append(DLA_chi2_matrix(tp))
-    else:
-        zchi2 = pool.map(DLA_chi2_matrix, test_params)
-
-    # reshape to correspond 1-1 with [z, nhi]
-    zchi2 = np.array(zchi2).reshape(len(zscan), len(nhiscan))
-
-    # find minimum of course search
+    # find minimum of coarse search
     bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
 
-    bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[0], coeff = refined_fit(bf[0], bf[1], zchi2[bf], None)
+    # if all of chi2 surface is > null chi2, do not bother with refined solve
+    if zchi2[bf] > chi2null:
+        return(zdla_soln, zerr_soln, nhi_soln, nhierr_soln, dchi2_soln, fitwarning, coeff_soln)
+
+    # otherwise let's continue with solving
+    bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[0], coeff = refined_fit(bf[0], bf[1], zchi2[bf], [])
    
 
     # check if DLA is detected using chi2 detection threshold AND didn't fail on coarse solve
@@ -664,25 +745,21 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
         coeff_soln[0] = coeff
                 
         # fix first solution
-        # TO DO : how should first solution be allowed to vary? vary only under certain criteria?
-        test_params = []
-        for z in zscan:
-            for nhi in nhiscan:
-                test_params.append((zdla_soln[0], nhi_soln[0], z, nhi))
+        # coarse solve - vectorized over NHI for each z
+        zchi2 = np.empty((len(zscan), len(nhiscan)))
         
-        if pool is None:
-            zchi2 = []
-            for tp in test_params:
-                zchi2.append(DLA_chi2_matrix(tp))
-        else:
-            zchi2 = pool.map(DLA_chi2_matrix, test_params) 
-            
-        # reshape to correspond 1-1 with [z, nhi]
-        zchi2 = np.array(zchi2).reshape(len(zscan), len(nhiscan))
-        # find minimum of course search
+        # Precompute fixed DLA transmission 
+        fixed_trans_1 = _build_fixed_trans(wave, [(zdla_soln[0], nhi_soln[0])])
+        for iz in range(len(zscan)):
+            trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_1
+            for inhi in range(len(nhiscan)):
+                zchi2[iz, inhi] = _solve_DLA_with_transmission(
+                    ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 2)
+                
+        # find minimum of coarse search
         bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
 
-        bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[1], coeff = refined_fit(bf[0], bf[1], zchi2[bf], (zdla_soln[0], nhi_soln[0]))
+        bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[1], coeff = refined_fit(bf[0], bf[1], zchi2[bf], [(zdla_soln[0], nhi_soln[0])])
 
         # TO DO : should subsequent DLAs be held to higher detection thresholds?
         if (((chi2null-dchi2_soln[0]) - chi2dof) > constants.detection) & ((fitwarning[1] & DLAFLAG.ZBOUNDARY) == 0):
@@ -695,26 +772,24 @@ def fit_spectrum_DLA(wave, flux, ivar, model_flux, varlss, searchmask, zqso, chi
             dchi2_soln[1] = (chi2null-dchi2_soln[0]) - chi2dof
             coeff_soln[1] = coeff
 
-            # fix first solution
-            # TO DO : how should first two solutions be allowed to vary? vary only under certain criteria like wings overlap?
-            test_params = []
-            for z in zscan:
-                for nhi in nhiscan:
-                    test_params.append((zdla_soln[0], nhi_soln[0], zdla_soln[1], nhi_soln[1], z, nhi))
-
-            if pool is None:
-                zchi2 = []
-                for tp in test_params:
-                    zchi2.append(DLA_chi2_matrix(tp))
-            else:
-                zchi2 = pool.map(DLA_chi2_matrix, test_params)
-
-            # reshape to correspond 1-1 with [z, nhi]
-            zchi2 = np.array(zchi2).reshape(len(zscan), len(nhiscan))
-            # find minimum of course search
+            # fix first two solutions
+            zchi2 = np.empty((len(zscan), len(nhiscan)))
+            
+            # Precompute fixed DLA transmission 
+            fixed_trans_2 = _build_fixed_trans(wave, [(zdla_soln[0], nhi_soln[0]),
+                                                      (zdla_soln[1], nhi_soln[1])])
+            for iz in range(len(zscan)):
+                trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_2
+                for inhi in range(len(nhiscan)):
+                    zchi2[iz, inhi] = _solve_DLA_with_transmission(
+                        ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 3)
+                    
+            # find minimum of coarse search
             bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
 
-            bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[2], coeff = refined_fit(bf[0], bf[1], zchi2[bf], (zdla_soln[0], nhi_soln[0], zdla_soln[1], nhi_soln[1]))
+            bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[2], coeff = refined_fit(bf[0], bf[1], zchi2[bf], 
+                                                                                      [(zdla_soln[0], nhi_soln[0]), 
+                                                                                       (zdla_soln[1], nhi_soln[1])])
 
             # TO DO : should subsequent DLAs be held to higher detection thresholds?
             if (((chi2null-dchi2_soln[0]-dchi2_soln[1]) - chi2dof) > constants.detection) & ((fitwarning[2] & DLAFLAG.ZBOUNDARY) == 0):
@@ -748,7 +823,7 @@ def PCA_reconstruction(coeff, eigvec):
 
     return( recon_spec )
 
-def fit_spectrum(wave, flux, ivar, model_flux, varlss, searchmask):
+def fit_spectrum(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask):
     """
     fit full spectrum with intrinsic flux model
 
@@ -757,6 +832,7 @@ def fit_spectrum(wave, flux, ivar, model_flux, varlss, searchmask):
     wave (array of floats) : observer frame wavelength in Angstroms
     flux (array of floats) : observed flux
     ivar (array of floats) : inverse variance on observed flux
+    var_pipe (array of floats) : pipeline variance estimated from ivar
     model_flux (2D array of floats) : eigenspectra model with dimension nvec X nlam,
                                     resampled with observed wave array at quasar's redshift
     varlss (array of floats) : LSS variance 
@@ -771,34 +847,38 @@ def fit_spectrum(wave, flux, ivar, model_flux, varlss, searchmask):
 
     # mask ivar = 0 entries to avoid divide by zero error
     mask = ivar != 0
+    
     # assume only pipeline error contributes for first fit
     # lss contribution is model flux dependent - solved for below
-    w = ivar
-    nw = np.zeros(len(w))
-    dw = np.ones(len(w))
+    var_pipe_masked = var_pipe[mask]
+    varlss_m = varlss[mask]
+    wm = ivar[mask].copy()
+    Mm = model_flux[:,mask]
+    fm = flux[mask]
+    dw_max = 1.0
 
     niter = 0
-    while (np.max(dw) > 10e-4) and (niter < 5):
+    while (dw_max > 10e-4) and (niter < 5):
         # linalg requires a and b are square matrices
         # also taking ivar weights into account
-        b = model_flux[:,mask].dot( w[mask]*flux[mask] )
-        a = model_flux[:,mask].dot( (model_flux[:,mask] * w[mask]).T )
+        b = Mm.dot( wm*fm )
+        a = Mm.dot( (Mm * wm).T )
 
         coeff = np.linalg.solve(a,b)
-        bestfit = np.dot(coeff,model_flux)
+        bestfit = np.dot(coeff,Mm)
         
         # adjust weights for LSS contribution
-        nw[mask] = 1./(ivar[mask]**-1 + varlss[mask]*bestfit[mask]**2)
-        dw[mask] = np.abs(w-nw)[mask]/w[mask]
-        dw[~mask] = 0.
-        w = nw
+        nw_m = 1.0 / (var_pipe_masked + varlss_m * bestfit**2)
+        dw_max = np.max(np.abs(wm - nw_m) / wm)
+        wm = nw_m
         niter += 1
 
     # get the chi2 of fit just in the region we are searching for DLAs
+    smask = mask&searchmask
     dof = np.sum(mask[searchmask]) - model_flux.shape[0]
-    bestfit = np.dot(coeff,model_flux)[mask&searchmask]
-    w = 1./(ivar[mask&searchmask]**-1 + varlss[mask&searchmask]*bestfit**2)
-    chi2 = np.sum(w * (flux[mask&searchmask] - bestfit)**2)
+    bestfit = coeff.dot(model_flux[:, smask])
+    w = 1./(var_pipe[smask] + varlss[smask]*bestfit**2)
+    chi2 = np.sum(w * (flux[smask] - bestfit)**2)
 
     return( coeff, chi2/dof)
 

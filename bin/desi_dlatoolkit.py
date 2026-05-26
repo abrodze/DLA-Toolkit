@@ -7,15 +7,15 @@ script for running DLA Toolkit on DESI spectra
 from astropy.table import Table, vstack
 import numpy as np
 from scipy.interpolate import interp1d
+import healpy
 import fitsio
 
 import os
 import datetime
 import time
 import argparse
-from concurrent.futures import ProcessPoolExecutor
-import glob
 import importlib
+import multiprocessing as mp
 
 from dlat import dlasearch
 from dlat import constants
@@ -23,6 +23,14 @@ from dlat import constants
 def timestamp():
     """ 
     return current time in YYYY-MM-DD HH:MM:SS format
+    
+    Arguments
+    ---------
+    None
+
+    Returns
+    -------
+    (str) : current timestamp formatted as YYYY-MM-DD HH:MM:SS
     """
     now = datetime.datetime.now()
     return(now.strftime("%Y-%m-%d %H:%M:%S"))
@@ -49,26 +57,26 @@ def parse(options=None):
     parser.add_argument('--mockdir', type = str, default = None, required = False,
                         help='path to mock directory')
     
-    parser.add_argument('--tilebased', default = False, required = False, action='store_true',
-                        help='use tile based coadds, default is False')
-    
     parser.add_argument('-m', '--model', type = str, default = None , required = False,
                         help='path to intrinsic flux model, defaults to v1.1 Redrock QSO_HIZ')
 
     parser.add_argument('--varlss', type = str, default = None, required = False,
-                        help='path to LSS variance input files, defaults to iron LSS variance')
+                        help='path to LSS variance input files, defaults to jura LSS variance')
 
     parser.add_argument('--balmask', default = False, required = False, action='store_true',
                         help='should BALs be masked using AI_CIV? Default is False but recommended setting is True')
 
-    parser.add_argument('-o', '--outdir', type=str, default = None, required = True,
+    parser.add_argument('-o', '--outdir', type = str, default = None, required = True,
                         help='output directory for DLA catalog')
 
-    parser.add_argument('--outfile', type=str, default = None, required = True,
+    parser.add_argument('--outfile', type = str, default = None, required = True,
                         help='name for output FITS file containing DLA catalog')
 
-    parser.add_argument('-n', '--nproc', type = int, default=64, required=False, 
-                        help='number of multiprocressing processes to use, default is 64')
+    parser.add_argument('-n', '--nproc', type = int, default=128, required=False, 
+                        help='number of multiprocressing processes to use, default is 128')
+
+    parser.add_argument('--dir_type', type = str, default = None, required = True,
+                        help='explicit directory tree type (healpix or uniqpix)')
 
     if options is None:
         args  = parser.parse_args()
@@ -88,7 +96,7 @@ def main(args=None):
         print(f"{timestamp()} - Critical Error: {args.qsocat} does not exist")
         exit(1)
     # if catalog is healpix based, we must have program & survey
-    if not(args.tilebased) and not(args.mocks):
+    if not(args.mocks):
         print(f"{timestamp()} - Warning: expecting healpix catalog for redux={args.release}, survey={args.survey}, program={args.program}; confirm this matches the catalog provided!")
     # confirm bal masking choice
     if not(args.balmask):
@@ -104,13 +112,13 @@ def main(args=None):
     # check if mock data
     if args.mocks and (args.mockdir is None):
         print(f"{timestamp()} - Critical Error: mocks argument set to true but no mock data path provided")
+        exit(1)
     elif args.mocks and not(os.path.exists(args.mockdir)):
         print(f"{timestamp()} - Critical Error: {args.mockdir} does not exist")
         exit(1)
     # check if output directory already exists
-    if not(os.path.isdir(args.outdir)):
-        os.mkdir(args.outdir)
-    # remove if present
+    os.makedirs(args.outdir, exist_ok=True)
+    # remove "fits" if present
     if args.outfile.endswith(".fits"):
         args.outfile = args.outfile.removesuffix(".fits")
 
@@ -120,7 +128,20 @@ def main(args=None):
     if args.mocks:
         catalog = read_mock_catalog(args.qsocat, args.balmask, args.mockdir)
     else:
-        catalog = read_catalog(args.qsocat, args.balmask, args.tilebased)
+        # set data path and expected healpix keyword 
+        args.dir_type = args.dir_type.upper()
+        if (args.dir_type == 'HPXPIXEL') or (args.dir_type == 'HEALPIXEL'):
+            pix_keyword = 'HPXPIXEL'
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+        elif args.dir_type == 'UNIQPIXEL':
+            pix_keyword = args.dir_type
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
+        else:
+            print(f"{timestamp()} - Critical Error: data directory tree argument is not understood. \
+                                    Must be HPXPIXEL, HEALPIXEL, or UNIQPIXEL.")
+            exit(1)
+            
+        catalog = read_catalog(args.qsocat, pix_keyword, args.balmask)
     
     if args.model is None:
         # locate default model file in repo
@@ -137,265 +158,327 @@ def main(args=None):
         # locate default file in repo
         args.varlss = str(importlib.resources.files('dlat').joinpath('lss_variance/jura-var-lss.fits'))
     fluxmodel = read_varlss(args.varlss, fluxmodel)
-
-    # set up for nested multiprocessing
-    nproc_futures = max(1, os.cpu_count() // args.nproc)
     
     if args.nproc == 1:
-        print(f"{timestamp()} - Warning: nproc set to {args.nproc}, disabling multiprocessing")
-        nproc_futures = 1
+        print(f"{timestamp()} - Warning: nproc set to {args.nproc}, multiprocessing disabled")
 
-    if not(args.tilebased) and not(args.mocks):
+    if not(args.mocks):
+
+        # create uniqpix/healpix list
+        unihpx, counts = np.unique(catalog[pix_keyword], return_counts=True)
+        # sort the catalog by expected workload per healpix
+        unihpx = unihpx[np.argsort(-counts)]
         
-        # healpix list
-        unihpx = np.unique(catalog['HPXPIXEL'])
         # process in batches to allow intermediate caching
-        groups = 25
-        group_step = int(len(unihpx)/groups)
+        if len(unihpx) < 3:
+            groups = 1
+            group_step = len(unihpx)
+        else:
+            groups = 3
+            group_step = int(np.ceil(len(unihpx)/groups))
 
-        datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+        # track whether file was written
+        group_exists = np.zeros(groups, dtype=bool)
    
-        if nproc_futures == 1:
+        if args.nproc == 1:
             
-            for g in np.arange(0, groups+1):
+            for g in np.arange(0, groups):
                 
                 # check if group has already been processed and confirm it is not empty
                 outfile = os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')
                 group_results = []
                 iini = g*group_step
-                ifin = g*group_step + group_step
+                ifin = min((g+1)*group_step, len(unihpx))
 
-                if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
+                if os.path.exists(outfile):
+                    group_exists[g] = True
+                    continue
+                if unihpx[iini:ifin].shape[0] == 0:
+                    continue
                     
-                    for hpx in unihpx[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath, catalog[catalog['HPXPIXEL'] == hpx],
-                                                           fluxmodel, args.nproc))
+                for hpx in unihpx[iini:ifin]:
+                    group_results.append(dlasearch.dlasearch_hpx(hpx, args.survey, args.program, datapath,
+                                                                 catalog[catalog[pix_keyword] == hpx], 
+                                                                 fluxmodel))
 
-                    # remove extra column from hpx with no detections
-                    group_results = vstack(group_results)
-                    if 'col0' in group_results.columns:
-                        group_results.remove_column('col0')
+                # remove extra column from hpx with no detections
+                group_results = vstack(group_results)
+                if 'col0' in group_results.columns:
+                    group_results.remove_column('col0')
 
-                    # write tmp file
-                    if len(group_results) != 0:
-                        group_results.write(outfile)
+                # write tmp file
+                if len(group_results) != 0:
+                    group_results.write(outfile)
+                    group_exists[g] = True
 
-        if nproc_futures > 1: 
+        if args.nproc > 1: 
+
+            # check if nproc is under-subscribed and adjust if necessary
+            if group_step < args.nproc:
+                args.nproc = group_step
+            
             arguments = [ {"healpix": hpx , \
                        "survey": args.survey, \
                        "program": args.program, \
                        "datapath": datapath, \
-                       "hpxcat": catalog[catalog['HPXPIXEL'] == hpx], \
+                       "pixcat": catalog[catalog[pix_keyword] == hpx], \
                        "model": fluxmodel, \
-                       "nproc" : args.nproc \
                        } for ih,hpx in enumerate(unihpx)]
         
-            with ProcessPoolExecutor(nproc_futures) as pool:
+            with mp.Pool(args.nproc) as pool:
 
-                for g in np.arange(0, groups+1):
+                for g in np.arange(0, groups):
             
                     # check if group has already been processed and confirm it is not empty
                     outfile = os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')
                     iini = g*group_step
-                    ifin = g*group_step + group_step
+                    ifin = min((g+1)*group_step, len(unihpx))
 
-                    if not(os.path.exists(outfile)) and (unihpx[iini:ifin].shape[0] > 0):
+                    if os.path.exists(outfile):
+                        group_exists[g] = True
+                        continue
+                    if unihpx[iini:ifin].shape[0] == 0:
+                        continue
 
-                        results = list(pool.map(_dlasearchhpx, arguments[iini:ifin]))
-                        
-                        # remove extra column from hpx with no detections
-                        results = vstack(results)
-                        if 'col0' in results.columns:
-                            results.remove_column('col0')
-                        
-                        # write tmp file
-                        if len(results) != 0:
-                            results.write(outfile)
+                    results = pool.map(_dlasearchhpx, arguments[iini:ifin])
+                    
+                    # remove extra column from hpx with no detections
+                    results = vstack(results)
+                    if 'col0' in results.columns:
+                        results.remove_column('col0')
+                    
+                    # write tmp file
+                    if len(results) != 0:
+                        results.write(outfile)
+                        group_exists[g] = True
 
         # combine all batches into final catalog
-        fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups+1):
-            if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))):
+        fin_results = None
+        for g in np.arange(groups):
+            chunkfile = os.path.join(args.outdir, f'{args.outfile}-chunk{g}-tmp.fits')
+            if not group_exists[g]:
+                continue  # group was empty, nothing to combine
+            if not os.path.exists(chunkfile):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-            else:
-                gresults = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'), ext=1))
-                fin_results = vstack([fin_results,gresults])
-            
-        # split into good and flagged catalogs
-        good_mask = fin_results['DLAFLAG'] == 0
-        fin_results_good = fin_results[good_mask]
-        fin_results_flagged = fin_results[~good_mask]
+                continue
+            gresults = Table(fitsio.read(chunkfile, ext=1))
+            fin_results = gresults if fin_results is None else vstack([fin_results, gresults])
 
-        # set extension name
-        fin_results_good.meta['EXTNAME'] = 'DLACAT'
-        fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
-
-        # remove DLAFLAG column from good catalogs
-        fin_results_good.remove_column('DLAFLAG')
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
-        fin_results_good.write(outfile, overwrite=True)
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
-        fin_results_flagged.write(outfile, overwrite=True)
-
-        # remove temporary files
-        for g in np.arange(groups+1):
-            if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits')):
-                os.remove(os.path.join(args.outdir,f'{args.outfile}-chunk{g}-tmp.fits'))
-            else:
-                print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-
-
-    # place holder until tile-based developed
-    elif args.tilebased:
-        # TO DO : process in batches to add caching
-        print('{timestamp()} - Critical Error: tile based capability does not exist')
-        exit(1)
+        if fin_results is None:
+            print(f'{timestamp()} - Warning: no DLA detections found across any group; no catalog written')
+        else:
+    
+            # split into good and flagged catalogs
+            good_mask = fin_results['DLAFLAG'] == 0
+            fin_results_good = fin_results[good_mask]
+            fin_results_flagged = fin_results[~good_mask]
+    
+            # set extension name
+            fin_results_good.meta['EXTNAME'] = 'DLACAT'
+            fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
+    
+            # remove DLAFLAG column from good catalogs
+            fin_results_good.remove_column('DLAFLAG')
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
+            fin_results_good.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
+            fin_results_flagged.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
+    
+            # remove temporary files
+            for g in range(groups):
+                chunkfile = os.path.join(args.outdir, f'{args.outfile}-chunk{g}-tmp.fits')
+                if not group_exists[g]:
+                    continue  # nothing to clean up
+                if os.path.exists(chunkfile):
+                    os.remove(chunkfile)
+                else:
+                    print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
 
     elif args.mocks:
         
         datapath = f'{args.mockdir}/spectra-16'
 
-        speclist = glob.glob(f'{datapath}/*/*/spectra-16*.fits')
-        speclist.sort()
+        mock_healpix_list = healpy.ang2pix(16, catalog['RA'], catalog['DEC'] , lonlat=True, nest=True)
+        unihpx, counts = np.unique(mock_healpix_list, return_counts=True)
+        # sort the catalog by expected workload per healpix
+        unihpx = unihpx[np.argsort(-counts)]
+        speclist = [f'{datapath}/{u//100}/{u}/spectra-16-{u}.fits' for u in unihpx]
+        
+        # process in batches to allow intermediate caching
+        if len(speclist) < 3:
+            groups = 1
+            group_step = len(speclist)
+        else:
+            groups = 3
+            group_step = int(np.ceil(len(speclist)/groups))
 
-        # process in batches for caching
-        groups = 25
-        group_step = int(len(speclist)/groups)
-
-        if nproc_futures == 1:
-            for g in np.arange(0, groups+1):
+        # track whether file was written
+        group_exists = np.zeros(groups, dtype=bool)
+        
+        if args.nproc == 1:
+            for g in np.arange(0, groups):
             
                 # check if group has already been processed and confirm it is not empty
                 outfile = os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
                 group_results = []
                 iini = g*group_step
-                ifin = g*group_step + group_step
+                ifin = min((g+1)*group_step, len(speclist))
 
-                if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
+                if os.path.exists(outfile):
+                    group_exists[g] = True
+                    continue
+                if len(speclist[iini:ifin]) == 0:
+                    continue
 
-                    for specfile in speclist[iini:ifin]:
-                        group_results.append(dlasearch.dlasearch_mock(specfile, catalog, fluxmodel, args.nproc))
+                for i,specfile in enumerate(speclist[iini:ifin]):
+                    u = unihpx[iini:ifin][g*i+i]
+                    cat_mask = mock_healpix_list == u
+                    group_results.append(dlasearch.dlasearch_mock(specfile, catalog[cat_mask], fluxmodel))
 
-                    # remove extra column from spec groups with no detections
-                    group_results = vstack(group_results)
-                    if 'col0' in group_results.columns:
-                        group_results.remove_column('col0')
+                # remove extra column from spec groups with no detections
+                group_results = vstack(group_results)
+                if 'col0' in group_results.columns:
+                    group_results.remove_column('col0')
 
-                    # write tmp file
-                    if len(group_results) != 0:
-                        group_results.write(outfile)
+                # write tmp file
+                if len(group_results) != 0:
+                    group_results.write(outfile)
+                    group_exists[g] = True
 
-        if nproc_futures > 1:
+        if args.nproc > 1:
+
+            # check if nproc is under-subscribed and adjust if necessary
+            if group_step < args.nproc:
+                args.nproc = group_step
+                
             arguments = [ {"specfile": specfile , \
-                       "catalog": catalog, \
+                       "catalog": catalog[mock_healpix_list == unihpx[ih]] , \
                        "model": fluxmodel, \
-                       "nproc" : args.nproc \
                        } for ih,specfile in enumerate(speclist) ]
+            
+            with mp.Pool(args.nproc) as pool:
 
-            with ProcessPoolExecutor(nproc_futures) as pool:
-
-                for g in np.arange(0, groups+1):
+                for g in np.arange(0, groups):
                     
                     # check if group has already been processed and confirm it is not empty
                     outfile = os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
                     iini = g*group_step
-                    ifin = g*group_step + group_step
+                    ifin = min((g+1)*group_step, len(speclist))
 
-                    if not(os.path.exists(outfile)) and (len(speclist[iini:ifin]) > 0):
+                    if os.path.exists(outfile):
+                        group_exists[g] = True
+                        continue
+                    if len(speclist[iini:ifin]) == 0:
+                        continue
 
-                        results = list(pool.map(_dlasearchmock, arguments[iini:ifin]))
+                    results = list(pool.map(_dlasearchmock, arguments[iini:ifin]))
 
-                        # remove extra column from hpx with no detections
-                        results = vstack(results)
-                        if 'col0' in results.columns:
-                            results.remove_column('col0')
+                    # remove extra column from hpx with no detections
+                    results = vstack(results)
+                    if 'col0' in results.columns:
+                        results.remove_column('col0')
 
-                        # write tmp file
-                        if len(results) != 0:
-                            results.write(outfile)
+                    # write tmp file
+                    if len(results) != 0:
+                        results.write(outfile)                            
+                        group_exists[g] = True
 
         # combine all batches into final catalog
-        fin_results = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk0-tmp.fits'), ext=1))
-        for g in np.arange(1, groups+1):
-            if not(os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))):
+        fin_results = None
+        for g in np.arange(groups):
+            chunkfile = os.path.join(args.outdir, f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
+            if not group_exists[g]:
+                continue  # group was empty, nothing to combine
+            if not os.path.exists(chunkfile):
                 print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-            else:
-                gresults = Table(fitsio.read(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'), ext=1))
-                fin_results = vstack([fin_results,gresults])
+                continue
+            gresults = Table(fitsio.read(chunkfile, ext=1))
+            fin_results = gresults if fin_results is None else vstack([fin_results, gresults])
 
-        # split into good and flagged catalogs
-        good_mask = fin_results['DLAFLAG'] == 0
-        fin_results_good = fin_results[good_mask]
-        fin_results_flagged = fin_results[~good_mask]
-        
-        # remove DLAFLAG column from good catalogs
-        fin_results_good.remove_column('DLAFLAG')
+        if fin_results is None:
+            print(f'{timestamp()} - Warning: no DLA detections found across any group; no catalog written')
+        else:
 
-        # set extension name
-        fin_results_good.meta['EXTNAME'] = 'DLACAT'
-        fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
-        fin_results_good.write(outfile, overwrite=True)
-
-        outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
-        if os.path.isfile(outfile):
-            print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
-        fin_results_flagged.write(outfile, overwrite=True)
-
-        # remove temporary files
-        for g in np.arange(groups+1):
-            if os.path.exists(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits')):
-                os.remove(os.path.join(args.outdir,f'{args.outfile}-mockcat-chunk{g}-tmp.fits'))
-            else:
-                print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
-
+            # split into good and flagged catalogs
+            good_mask = fin_results['DLAFLAG'] == 0
+            fin_results_good = fin_results[good_mask]
+            fin_results_flagged = fin_results[~good_mask]
+            
+            # remove DLAFLAG column from good catalogs
+            fin_results_good.remove_column('DLAFLAG')
+    
+            # set extension name
+            fin_results_good.meta['EXTNAME'] = 'DLACAT'
+            fin_results_flagged.meta['EXTNAME'] = 'DLACAT'
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-good.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-good.fits already exists in {args.outdir}, overwriting')
+            fin_results_good.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of good detections to {outfile}')
+    
+            outfile = f"{os.path.join(args.outdir, args.outfile)}-flagged.fits"
+            if os.path.isfile(outfile):
+                print(f'{timestamp()} - Warning: {args.outfile}-flagged.fits already exists in {args.outdir}, overwriting')
+            fin_results_flagged.write(outfile, overwrite=True)
+            print(f'{timestamp()} - wrote DLA catalog of flagged detections to {outfile}')
+    
+            # remove temporary files
+            print(f'{timestamp()} - removing tmp files')
+            for g in range(groups):
+                chunkfile = os.path.join(args.outdir, f'{args.outfile}-mockcat-chunk{g}-tmp.fits')
+                if not group_exists[g]:
+                    continue  # nothing to clean up
+                if os.path.exists(chunkfile):
+                    os.remove(chunkfile)
+                else:
+                    print(f'{timestamp()} - Warning: temporary file for group {g} does not exist')
+                    
     tfin = time.time()
     total_time = tfin-tini
 
-    print(f'{timestamp()} - SUCCESS: wrote DLA catalog to {outfile}')
+    print(f'{timestamp()} - SUCCESS')
     print(f'total run time: {np.round(total_time/60,1)} minutes')
 
-def read_catalog(qsocat, balmask, bytile):
+def read_catalog(qsocat, pix_keyword, balmask):
     """
     read quasar catalog
 
     Arguments
     ---------
     qsocat (str) : path to quasar catalog
+    pix_keyword (str) : name of healpix column; must be either UNIQPIX or HPXPIXEL
     balmask (bool) : should BAL attributes from baltools be read in?
-    bytile (bool) : catalog is tilebased, default assumption is healpix
     
     Returns
     -------
-    table of relevant attributes for z>2 quasars
+    table of relevant attributes for quasars in default redshift range set by constants.py
 
     """
+
+    if not(np.any(pix_keyword == np.array(['UNIQPIX','HPXPIXEL']))):
+        print(f'{timestamp()} - Critical Error: unexpected healpix keyword passed to read_catalog')
+        exit(1)
 
     if balmask:
         try:
             # read the following columns from qsocat
-            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'HPXPIXEL', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
-            if bytile:
-                cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450',
-                        'VMAX_CIV_450']
+            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword, 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
             catalog = Table(fitsio.read(qsocat, ext=1, columns=cols))
         except:
             print(f'{timestamp()} - Critical Error: cannot find {cols} in quasar catalog')
             exit(1)
     else:
         # read the following columns from qsocat
-        cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'HPXPIXEL']
-        if bytile:
-            cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', 'TILEID', 'PETAL_LOC']
+        cols = ['TARGETID', 'TARGET_RA', 'TARGET_DEC', 'Z', pix_keyword]
         catalog = Table(fitsio.read(qsocat, ext=1, columns=cols))
 
     print(f'{timestamp()} - Successfully read quasar catalog: {qsocat}')
@@ -441,37 +524,40 @@ def read_mock_catalog(qsocat, balmask, mockpath):
     catalog = catalog[zmask]
 
     if balmask:
-        try:
-            # open bal catalog
-            balcat = os.path.join(mockpath,'bal_cat.fits')
-            cols = ['TARGETID', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
-            balcat = Table(fitsio.read(balcat, ext=1, columns=cols))
+
+        # define columns to read
+        cols = ['TARGETID', 'AI_CIV', 'NCIV_450', 'VMIN_CIV_450', 'VMAX_CIV_450']
+        balcat_path = os.path.join(mockpath,'bal_cat.fits')
+        balcat = Table(fitsio.read(balcat_path, ext=1, columns=cols))
+
+        # add columns to catalog
+        ai = np.full(len(catalog), 0.)
+        nciv = np.full(len(catalog), 0)
+        vmin = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
+        vmax = np.full((len(catalog), balcat['VMIN_CIV_450'].shape[1]), -1.)
             
-            # sort BAL catalog by TARGETID for searchsorted
-            bal_tids = np.asarray(balcat['TARGETID'])
-            order = np.argsort(bal_tids)
-            bal_tids_sorted = bal_tids[order]
+        # sort BAL catalog by TARGETID for searchsorted
+        bal_tids = np.asarray(balcat['TARGETID'])
+        order = np.argsort(bal_tids)
+        bal_tids_sorted = bal_tids[order]
     
-            cat_tids = np.asarray(catalog['TARGETID'])
-            # locate each catalog TID in the sorted BAL TID array
-            idx = np.searchsorted(bal_tids_sorted, cat_tids)
-            # guard against out-of-range and confirm exact match
-            in_range = idx < len(bal_tids_sorted)
-            valid = np.zeros(len(cat_tids), dtype=bool)
-            valid[in_range] = bal_tids_sorted[idx[in_range]] == cat_tids[in_range]
+        cat_tids = np.asarray(catalog['TARGETID'])
+        # locate each catalog TID in the sorted BAL TID array
+        idx = np.searchsorted(bal_tids_sorted, cat_tids)
+        # guard against out-of-range and confirm exact match
+        in_range = idx < len(bal_tids_sorted)
+        valid = np.zeros(len(cat_tids), dtype=bool)
+        valid[in_range] = bal_tids_sorted[idx[in_range]] == cat_tids[in_range]
     
-            match_rows = order[idx[valid]]  # rows in original balcat
-            ai[valid] = balcat['AI_CIV'][match_rows]
-            nciv[valid] = balcat['NCIV_450'][match_rows]
-            vmin[valid] = balcat['VMIN_CIV_450'][match_rows]
-            vmax[valid] = balcat['VMAX_CIV_450'][match_rows]
+        match_rows = order[idx[valid]]  # rows in original balcat
+        ai[valid] = balcat['AI_CIV'][match_rows]
+        nciv[valid] = balcat['NCIV_450'][match_rows]
+        vmin[valid] = balcat['VMIN_CIV_450'][match_rows]
+        vmax[valid] = balcat['VMAX_CIV_450'][match_rows]
     
-            catalog.add_columns([ai, nciv, vmin, vmax],
-                                names=['AI_CIV','NCIV_450','VMIN_CIV_450','VMAX_CIV_450'])
+        catalog.add_columns([ai, nciv, vmin, vmax],
+                            names=['AI_CIV','NCIV_450','VMIN_CIV_450','VMAX_CIV_450'])
         
-        except:
-            print(f'{timestamp()} - Critical Error: cannot find mock bal_cat.fits in {mockpath}')
-            exit(1)
     
     return( catalog )
 
