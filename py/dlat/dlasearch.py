@@ -379,7 +379,7 @@ def parabola(x, a, b, c):
 
 
 def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, return_coeff, 
-                                 DLA_transmission, NDLA):
+                                 DLA_transmission, NDLA, maxiter=5):
     """
     fit spectrum with eigenspectra given a fixed DLA profile
 
@@ -395,6 +395,7 @@ def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave,
     return_coeff (bool) : return coefficients of bestfit
     DLA_transmission (array of floats) :  precomputed transmission array to multiplied against model
     NDLA (int) : number of DLAs being fit
+    maxiter (int): limit of var_lss optimization loop, set lower for coarse solve
 
     Returns
     -------
@@ -419,7 +420,8 @@ def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave,
     dw_max = 1.0
 
     niter = 0
-    while (dw_max > 10e-4) and (niter < 5):
+        
+    while (dw_max > 10e-4) and (niter < maxiter):
         # linalg requires a and b are square matrices
         # also taking ivar weights into account
         b = M.dot( w_m*flux_m )
@@ -727,7 +729,8 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
         trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_0
         for inhi in range(len(nhiscan)):
             zchi2[iz, inhi] = _solve_DLA_with_transmission(
-                ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 1)
+                ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, 
+                trans_nhi[inhi], 1, 2)
 
     # find minimum of coarse search
     bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
@@ -761,7 +764,7 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
             trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_1
             for inhi in range(len(nhiscan)):
                 zchi2[iz, inhi] = _solve_DLA_with_transmission(
-                    ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 2)
+                    ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 2, 2)
                 
         # find minimum of coarse search
         bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
@@ -789,7 +792,7 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
                 trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_2
                 for inhi in range(len(nhiscan)):
                     zchi2[iz, inhi] = _solve_DLA_with_transmission(
-                        ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 3)
+                        ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 3, 2)
                     
             # find minimum of coarse search
             bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
