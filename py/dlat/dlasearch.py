@@ -412,6 +412,7 @@ def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave,
     # assume only pipeline error contributes for first fit
     # lss contribution is model flux dependent - solved for below
     w_m = ivar.copy()
+    w_m = w_m[mask]
     flux_m = flux[mask]
     var_pipe_m = var_pipe[mask]
     varlss_m = varlss[mask]
