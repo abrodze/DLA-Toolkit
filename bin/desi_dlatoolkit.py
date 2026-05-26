@@ -7,22 +7,18 @@ script for running DLA Toolkit on DESI spectra
 from astropy.table import Table, vstack
 import numpy as np
 from scipy.interpolate import interp1d
+import healpy
 import fitsio
 
 import os
 import datetime
 import time
 import argparse
-import glob
 import importlib
 import multiprocessing as mp
 
 from dlat import dlasearch
 from dlat import constants
-
-# set expection for healpix or uniqpix
-healpix_mountains = np.array(['iron','jura','kibo','loa'])
-uniqpix_mountains = np.array(['matterhorn', 'nevis'])
 
 def timestamp():
     """ 
@@ -79,9 +75,8 @@ def parse(options=None):
     parser.add_argument('-n', '--nproc', type = int, default=128, required=False, 
                         help='number of multiprocressing processes to use, default is 128')
 
-    parser.add_argument('--dir_type', type = str, default = None, required = False,
-                        help='explicit directory tree type (e.g., healpix or uniqpix), \
-                        if none is passed then the release argument is used to make dir_type guess')
+    parser.add_argument('--dir_type', type = str, default = None, required = True,
+                        help='explicit directory tree type (healpix or uniqpix)')
 
     if options is None:
         args  = parser.parse_args()
@@ -133,27 +128,19 @@ def main(args=None):
     if args.mocks:
         catalog = read_mock_catalog(args.qsocat, args.balmask, args.mockdir)
     else:
-        # set data path and expected healpix keyword based on release name or passed dir_type argument if understood
-        if args.dir_type is not None:
-            if args.dir_type == 'HPXPIXEL':
-                pix_keyword = args.dir_type
-                datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
-            elif args.dir_type == 'UNIQPIXEL':
-                pix_keyword = args.dir_type
-                datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
-            else:
-                print(f"{timestamp()} - Critical Error: data directory tree argument is not understood")
-        elif np.any(args.release == healpix_mountains):
-            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+        # set data path and expected healpix keyword 
+        args.dir_type.upper()
+        if (args.dir_type == 'HPXPIXEL') or (args.dir_type == 'HEALPIXEL'):
             pix_keyword = 'HPXPIXEL'
-        elif np.any(args.release == uniqpix_mountains):
+            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
+        elif args.dir_type == 'UNIQPIXEL':
+            pix_keyword = args.dir_type
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
-            pix_keyword = 'UNIQPIXEL'
         else:
-            print(f"{timestamp()} - Warning: {args.release} not recognized as an existing reduction and no dir_type argument passed.\
-                                    UNIQPIX structure will be assumed")
-            datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
-            pix_keyword = 'UNIQPIXEL'
+            print(f"{timestamp()} - Critical Error: data directory tree argument is not understood. \
+                                    Must be HPXPIXEL, HEALPIXEL, or UNIQPIXEL.")
+            exit(1)
+            
         catalog = read_catalog(args.qsocat, pix_keyword, args.balmask)
     
     if args.model is None:
@@ -178,13 +165,16 @@ def main(args=None):
     if not(args.mocks):
 
         # create uniqpix/healpix list
-        unihpx = np.unique(catalog[pix_keyword])
+        unihpx, counts = np.unique(catalog[pix_keyword], return_counts=True)
+        # sort the catalog by expected workload per healpix
+        unihpx = unihpx[np.argsort(-counts)]
+        
         # process in batches to allow intermediate caching
-        if len(unihpx) < 10:
+        if len(unihpx) < 5:
             groups = 1
             group_step = len(unihpx)
         else:
-            groups = 10
+            groups = 5
             group_step = int(np.ceil(len(unihpx)/groups))
 
         # track whether file was written
@@ -225,7 +215,7 @@ def main(args=None):
 
             # check if nproc is under-subscribed and adjust if necessary
             if group_step < args.nproc:
-                args.nproc = group_set
+                args.nproc = group_step
             
             arguments = [ {"healpix": hpx , \
                        "survey": args.survey, \
@@ -317,14 +307,18 @@ def main(args=None):
         datapath = f'{args.mockdir}/spectra-16'
 
         speclist = glob.glob(f'{datapath}/*/*/spectra-16*.fits')
-        speclist.sort()
 
+        unipx, counts = np.unique(healpy.ang2pix(16, catalog['RA'], catalog['DEC'] , lonlat=True, nest=True), return_count=True)
+        # sort the catalog by expected workload per healpix
+        unihpx = unihpx[np.argsort(-counts)]
+        speclist = [f'{datapath}/{u//100}/{u}/spectra-16-{u}.fits' for u in unihpx]
+        
         # process in batches to allow intermediate caching
-        if len(speclist) < 10:
+        if len(speclist) < 5:
             groups = 1
             group_step = len(speclist)
         else:
-            groups = 10
+            groups = 5
             group_step = int(np.ceil(len(speclist)/groups))
 
         # track whether file was written
@@ -362,7 +356,7 @@ def main(args=None):
 
             # check if nproc is under-subscribed and adjust if necessary
             if group_step < args.nproc:
-                args.nproc = group_set
+                args.nproc = group_step
                 
             arguments = [ {"specfile": specfile , \
                        "catalog": catalog, \
