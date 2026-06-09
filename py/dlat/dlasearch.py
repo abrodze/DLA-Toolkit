@@ -369,7 +369,7 @@ def parabola(x, a, b, c):
 
 
 def _solve_DLA_with_transmission(ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, return_coeff, 
-                                 DLA_transmission, NDLA, maxiter=5):
+                                 DLA_transmission, NDLA, maxiter=8):
     """
     fit spectrum with eigenspectra given a fixed DLA profile
 
@@ -720,18 +720,17 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
         for inhi in range(len(nhiscan)):
             zchi2[iz, inhi] = _solve_DLA_with_transmission(
                 ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, 
-                trans_nhi[inhi], 1)
+                trans_nhi[inhi], 1, 5)
 
     # find minimum of coarse search
     bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
 
-    # if all of chi2 surface is > null chi2, do not bother with refined solve
-    if zchi2[bf] > chi2null:
+    ## if all of chi2 surface is > null chi2 with a buffer, do not bother with refined solve
+    if zchi2[bf] > (chi2null + constants.detection):
         return(zdla_soln, zerr_soln, nhi_soln, nhierr_soln, dchi2_soln, fitwarning, coeff_soln)
 
     # otherwise let's continue with solving
-    bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[0], coeff = refined_fit(bf[0], bf[1], zchi2[bf], [])
-   
+    bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[0], coeff = refined_fit(bf[0], bf[1], zchi2[bf], [])   
 
     # check if DLA is detected using chi2 detection threshold AND didn't fail on coarse solve
     if ((chi2null - chi2dof) > constants.detection) & ((fitwarning[0] & DLAFLAG.ZBOUNDARY) == 0):
@@ -754,10 +753,14 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
             trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_1
             for inhi in range(len(nhiscan)):
                 zchi2[iz, inhi] = _solve_DLA_with_transmission(
-                    ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 2)
+                    ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 2, 5)
                 
         # find minimum of coarse search
         bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
+
+        ## if all of chi2 surface is > null chi2 with a buffer, do not bother with refined solve
+        if zchi2[bf] > (chi2null + constants.detection):
+            return(zdla_soln, zerr_soln, nhi_soln, nhierr_soln, dchi2_soln, fitwarning, coeff_soln)
 
         bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[1], coeff = refined_fit(bf[0], bf[1], zchi2[bf], [(zdla_soln[0], nhi_soln[0])])
 
@@ -782,10 +785,14 @@ def fit_spectrum_DLA(wave, flux, ivar, var_pipe, model_flux, varlss, searchmask,
                 trans_nhi = np.exp(-nhi_factors[:, None] * tau_grid[iz][None, :]) * fixed_trans_2
                 for inhi in range(len(nhiscan)):
                     zchi2[iz, inhi] = _solve_DLA_with_transmission(
-                        ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 3)
+                        ivar, flux, model_flux, var_pipe, varlss, wave, searchmask, False, trans_nhi[inhi], 3, 5)
                     
             # find minimum of coarse search
             bf = np.unravel_index(zchi2.argmin(), zchi2.shape)
+
+            ## if all of chi2 surface is > null chi2 with a buffer, do not bother with refined solve
+            if zchi2[bf] > (chi2null + constants.detection):
+                return(zdla_soln, zerr_soln, nhi_soln, nhierr_soln, dchi2_soln, fitwarning, coeff_soln)
 
             bestz, zerr, bestnhi, nhierr, chi2dof, fitwarning[2], coeff = refined_fit(bf[0], bf[1], zchi2[bf], 
                                                                                       [(zdla_soln[0], nhi_soln[0]), 
