@@ -77,6 +77,12 @@ def parse(options=None):
 
     parser.add_argument('--dir_type', type = str, default = None, required = True,
                         help='explicit directory tree type (healpix or uniqpix)')
+    
+    parser.add_argument('--datapath', type = str, default = None, required = False,
+                        help='explicit directory path (release/survey/program will NOT be used to construct data path)')
+
+    parser.add_argument('--hpx_nside', type= int, default = None, required = False,
+                        help='healpix nside; if dir_type=HEALPIX then HEALPIX is calculated from RA/DEC using nside=hpx_nside if provided')
 
     if options is None:
         args  = parser.parse_args()
@@ -130,18 +136,38 @@ def main(args=None):
     else:
         # set data path and expected healpix keyword 
         args.dir_type = args.dir_type.upper()
-        if (args.dir_type == 'HPXPIXEL') or (args.dir_type == 'HEALPIXEL'):
+        # boolean to use healpix from catalog or to calcuate from nside
+        calculate_healpix_num = False
+        if (args.dir_type == 'HPXPIXEL') or (args.dir_type == 'HEALPIXEL') or (args.dir_type == 'HEALPIX'):
             pix_keyword = 'HPXPIXEL'
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/healpix/{args.survey}/{args.program}'
-        elif args.dir_type == 'UNIQPIXEL':
+            if args.hpx_nside is not None:
+                # need to explicitly map RA and DEC to nside healpix
+                print(f"{timestamp()} - HEALPIX number will be determined from RA/DEC using nside={args.hpx_nside}")
+                calculate_healpix_num = True
+            else:
+                f(f"{timestamp()} - HEALPIX numbers will be pulled from {pix_keyword} column in catalog to find coadd files")
+        elif args.dir_type == 'UNIQPIX':
             pix_keyword = args.dir_type
             datapath = f'/global/cfs/cdirs/desi/spectro/redux/{args.release}/spectra/{args.survey}/{args.program}'
         else:
             print(f"{timestamp()} - Critical Error: data directory tree argument is not understood. \
-                                    Must be HPXPIXEL, HEALPIXEL, or UNIQPIXEL.")
+                                    Must be HPXPIXEL, HEALPIX, HEALPIXEL, or UNIQPIX.")
             exit(1)
+
+        # if explicit data path was passed, overwrite assume data path structure (used for QSO-only Lya redux)
+        if args.datapath is not None:
+            datapath = args.datapath
             
         catalog = read_catalog(args.qsocat, pix_keyword, args.balmask)
+
+        if calculate_healpix_num:
+            # redetermine healpix number and overwrite pix_keyword column
+            print(f"{timestamp()} - calculating HEALPIX numbers with nside={args.hpx_nside}")
+            catalog[pix_keyword] = healpy.ang2pix(args.hpx_nside,
+                                catalog['TARGET_RA'], catalog['TARGET_DEC'],
+                                lonlat=True, nest=True)
+            print(f"{timestamp()} - completed calculation of healpix numbers")
     
     if args.model is None:
         # locate default model file in repo
@@ -455,7 +481,7 @@ def read_catalog(qsocat, pix_keyword, balmask):
     Arguments
     ---------
     qsocat (str) : path to quasar catalog
-    pix_keyword (str) : name of healpix column; must be either UNIQPIX or HPXPIXEL
+    pix_keyword (str) : name of healpix column; must be either UNIQ or HPXPIXEL
     balmask (bool) : should BAL attributes from baltools be read in?
     
     Returns
